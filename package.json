@@ -16,6 +16,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsup",
     "lint": "eslint .",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "prepare": "pnpm run build"
   },

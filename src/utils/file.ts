@@ -39,6 +39,16 @@ export async function pathExists(targetPath: string): Promise<boolean> {
 }
 
 /**
+ * 读取文本文件。
+ *
+ * @param filePath 文件路径。
+ * @returns 文本内容。
+ */
+export async function readTextFile(filePath: string): Promise<string> {
+  return fs.readFile(filePath, 'utf8');
+}
+
+/**
  * 写入 JSON 文件。
  *
  * @param filePath 文件路径。
@@ -48,6 +58,16 @@ export async function writeJsonFile(filePath: string, data: unknown): Promise<vo
   await fs.writeJson(filePath, data, {
     spaces: 2,
   });
+}
+
+/**
+ * 写入文本文件。
+ *
+ * @param filePath 文件路径。
+ * @param content 文本内容。
+ */
+export async function writeTextFile(filePath: string, content: string): Promise<void> {
+  await fs.outputFile(filePath, content);
 }
 
 /**

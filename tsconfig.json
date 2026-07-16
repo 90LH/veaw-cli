@@ -21,6 +21,6 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src", "tsup.config.ts", "eslint.config.mjs"],
+  "include": ["src", "tests", "tsup.config.ts", "eslint.config.mjs"],
   "exclude": ["dist", "node_modules"]
 }

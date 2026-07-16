@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { registerAskCommand } from './commands/ask.js';
 import { registerCatalogCommand } from './commands/catalog.js';
 import { registerContextCommand } from './commands/context.js';
 import { registerDoctorCommand } from './commands/doctor.js';
@@ -16,6 +17,7 @@ program
   .description('Veaw command line interface.')
   .version(CLI_VERSION, '-v, --version', 'Display the current CLI version.');
 
+registerAskCommand(program);
 registerInitCommand(program);
 registerSyncCommand(program);
 registerCatalogCommand(program);
