@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerInitCommand } from './commands/init.js';
+import { registerSyncCommand } from './commands/sync.js';
 import { CLI_VERSION, registerVersionCommand } from './commands/version.js';
 
 /**
@@ -14,6 +15,7 @@ program
   .version(CLI_VERSION, '-v, --version', 'Display the current CLI version.');
 
 registerInitCommand(program);
+registerSyncCommand(program);
 registerDoctorCommand(program);
 registerVersionCommand(program);
 
