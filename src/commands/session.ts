@@ -553,7 +553,7 @@ function replaceSessionBlock(content: string, block: SessionBlock, nextBlock: st
  * @returns 活动会话块。
  */
 function findActiveSessionBlock(content: string): SessionBlock | undefined {
-  return readSessionBlocks(content)
+  return [...readSessionBlocks(content)]
     .reverse()
     .find((block) => readField(block.content, 'Status') === 'active');
 }
