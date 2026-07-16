@@ -1,0 +1,51 @@
+{
+  "name": "veaw-cli",
+  "version": "0.1.0",
+  "description": "A modern TypeScript CLI scaffold for Veaw.",
+  "type": "module",
+  "bin": {
+    "veaw": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "prepare": "pnpm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "cli",
+    "typescript",
+    "commander"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^12.1.0",
+    "execa": "^9.5.2",
+    "fs-extra": "^11.2.0",
+    "inquirer": "^12.3.0",
+    "ora": "^8.1.1",
+    "zx": "^8.3.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^22.10.7",
+    "eslint": "^9.18.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}
