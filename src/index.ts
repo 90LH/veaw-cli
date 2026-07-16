@@ -4,6 +4,8 @@ import { registerCatalogCommand } from './commands/catalog.js';
 import { registerContextCommand } from './commands/context.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerInitCommand } from './commands/init.js';
+import { registerPlanCommand } from './commands/plan.js';
+import { registerSessionCommand } from './commands/session.js';
 import { registerSyncCommand } from './commands/sync.js';
 import { CLI_VERSION, registerVersionCommand } from './commands/version.js';
 
@@ -22,6 +24,8 @@ registerInitCommand(program);
 registerSyncCommand(program);
 registerCatalogCommand(program);
 registerContextCommand(program);
+registerPlanCommand(program);
+registerSessionCommand(program);
 registerDoctorCommand(program);
 registerVersionCommand(program);
 
