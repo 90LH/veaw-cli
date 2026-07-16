@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { registerCatalogCommand } from './commands/catalog.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerInitCommand } from './commands/init.js';
 import { registerSyncCommand } from './commands/sync.js';
@@ -16,6 +17,7 @@ program
 
 registerInitCommand(program);
 registerSyncCommand(program);
+registerCatalogCommand(program);
 registerDoctorCommand(program);
 registerVersionCommand(program);
 
