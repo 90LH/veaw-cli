@@ -1,6 +1,16 @@
 import fs from 'fs-extra';
 
 /**
+ * 读取目录下的直接子项名称。
+ *
+ * @param directoryPath 目录路径。
+ * @returns 子项名称列表。
+ */
+export async function readDirectory(directoryPath: string): Promise<string[]> {
+  return fs.readdir(directoryPath);
+}
+
+/**
  * 确保目录存在。
  *
  * @param directoryPath 目录路径。
@@ -29,4 +39,21 @@ export async function writeJsonFile(filePath: string, data: unknown): Promise<vo
   await fs.writeJson(filePath, data, {
     spaces: 2,
   });
+}
+
+/**
+ * 在文件不存在时写入文本内容。
+ *
+ * @param filePath 文件路径。
+ * @param content 文本内容。
+ * @returns 是否写入了文件。
+ */
+export async function writeTextFileIfNotExists(filePath: string, content: string): Promise<boolean> {
+  if (await pathExists(filePath)) {
+    return false;
+  }
+
+  await fs.outputFile(filePath, content);
+
+  return true;
 }
