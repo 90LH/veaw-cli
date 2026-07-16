@@ -5,10 +5,12 @@ import {
   ensureDirectory,
   pathExists,
   readDirectory,
+  removeDirectory,
   writeJsonFile,
   writeTextFileIfNotExists,
 } from '../utils/file.js';
 import { logger } from '../utils/logger.js';
+import { copyAssetsToWorkspace } from '../utils/template.js';
 
 /**
  * 初始化命令选项。
@@ -56,6 +58,32 @@ const README_FILE_NAME = 'README.md';
 const DEFAULT_PROJECT_TYPE: ProjectType = 'Vue3';
 
 /**
+ * 已存在工作区的初始化动作。
+ */
+type ExistingWorkspaceAction = 'initMissing' | 'overwriteDefaults' | 'rebuild' | 'exit';
+
+/**
+ * 需要保留的分析数据路径。
+ */
+const PRESERVED_WORKSPACE_ITEMS = [
+  'component-catalog',
+  'context.md',
+  'project.json',
+  'session-log.md',
+  VEAW_CONFIG_FILE_NAME,
+] as const;
+
+/**
+ * 覆盖默认配置时仍需保留的分析数据路径。
+ */
+const PRESERVED_ANALYSIS_ITEMS = ['component-catalog', 'context.md', 'project.json', 'session-log.md'] as const;
+
+/**
+ * 默认目录名称列表。
+ */
+const DEFAULT_WORKSPACE_DIRECTORIES = ['prompts', 'templates', 'commands'] as const;
+
+/**
  * 继续初始化提问结果。
  */
 interface ContinueAnswers {
@@ -63,6 +91,26 @@ interface ContinueAnswers {
    * 是否继续初始化。
    */
   readonly shouldContinue: boolean;
+}
+
+/**
+ * 已存在工作区动作提问结果。
+ */
+interface ExistingWorkspaceAnswers {
+  /**
+   * 工作区初始化动作。
+   */
+  readonly action: ExistingWorkspaceAction;
+}
+
+/**
+ * 重建确认提问结果。
+ */
+interface RebuildConfirmAnswers {
+  /**
+   * 用户输入的确认文本。
+   */
+  readonly confirmation: string;
 }
 
 /**
@@ -150,24 +198,70 @@ export function registerInitCommand(program: Command): void {
 async function runInitCommand(options: InitOptions): Promise<void> {
   try {
     const context = createInitContext(process.cwd());
-    const canContinue = await resolveCanContinue(context, options);
 
-    if (!canContinue) {
-      logger.warn('Initialization cancelled.');
+    if (await pathExists(context.veawDirectory)) {
+      await runExistingWorkspaceInit(context, options);
       return;
     }
 
-    const answers = await resolveInitAnswers(context, options);
-
-    await createVeawProjectFiles(context, answers);
-
-    logger.info('✅ Project initialized successfully');
+    await runFullInit(context, options);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
 
     logger.error(`Failed to initialize project: ${message}`);
     process.exitCode = 1;
   }
+}
+
+/**
+ * 执行完整初始化。
+ *
+ * @param context 初始化上下文。
+ * @param options 初始化命令选项。
+ */
+async function runFullInit(context: InitContext, options: InitOptions): Promise<void> {
+  const canContinue = await resolveCanContinue(context, options);
+
+  if (!canContinue) {
+    logger.warn('Initialization cancelled.');
+    return;
+  }
+
+  const answers = await resolveInitAnswers(context, options);
+
+  await createVeawProjectFiles(context, answers);
+  logger.success('初始化完成');
+}
+
+/**
+ * 执行已存在工作区的增量初始化。
+ *
+ * @param context 初始化上下文。
+ * @param options 初始化命令选项。
+ */
+async function runExistingWorkspaceInit(context: InitContext, options: InitOptions): Promise<void> {
+  const action = await resolveExistingWorkspaceAction(options);
+
+  if (action === 'exit') {
+    logger.warn('Initialization cancelled.');
+    return;
+  }
+
+  if (action === 'initMissing') {
+    await logPreservedWorkspaceItems(context);
+    await initializeMissingWorkspaceFiles(context);
+    logger.success('初始化完成');
+    return;
+  }
+
+  if (action === 'overwriteDefaults') {
+    await logPreservedAnalysisItems(context);
+    await overwriteDefaultWorkspaceFiles(context);
+    logger.success('初始化完成');
+    return;
+  }
+
+  await rebuildWorkspace(context, options);
 }
 
 /**
@@ -187,6 +281,47 @@ function createInitContext(targetDirectory: string): InitContext {
     configPath: path.join(veawDirectory, VEAW_CONFIG_FILE_NAME),
     readmePath: path.join(targetDirectory, README_FILE_NAME),
   };
+}
+
+/**
+ * 获取已存在工作区的处理动作。
+ *
+ * @param options 初始化命令选项。
+ * @returns 工作区处理动作。
+ */
+async function resolveExistingWorkspaceAction(options: InitOptions): Promise<ExistingWorkspaceAction> {
+  if (options.yes === true) {
+    return 'initMissing';
+  }
+
+  const answers = await inquirer.prompt<ExistingWorkspaceAnswers>([
+    {
+      type: 'list',
+      name: 'action',
+      message: '检测到已有 VEAW 工作区。请选择：',
+      choices: [
+        {
+          name: '初始化缺失文件（推荐）',
+          value: 'initMissing',
+        },
+        {
+          name: '覆盖默认配置',
+          value: 'overwriteDefaults',
+        },
+        {
+          name: '完全重建 .veaw（危险）',
+          value: 'rebuild',
+        },
+        {
+          name: '退出',
+          value: 'exit',
+        },
+      ],
+      default: 'initMissing',
+    },
+  ]);
+
+  return answers.action;
 }
 
 /**
@@ -283,9 +418,139 @@ async function createVeawProjectFiles(context: InitContext, answers: InitAnswers
   await ensureDirectory(context.veawDirectory);
   await writeJsonFile(context.configPath, createVeawConfig(answers.projectType));
   await createReadmeIfNeeded(context.readmePath, answers.name);
-  await ensureDirectory(path.join(context.veawDirectory, 'commands'));
-  await ensureDirectory(path.join(context.veawDirectory, 'templates'));
-  await ensureDirectory(path.join(context.veawDirectory, 'prompts'));
+  await ensureDefaultWorkspaceDirectories(context);
+  await copyDefaultAssets(context);
+}
+
+/**
+ * 初始化缺失的工作区文件。
+ *
+ * @param context 初始化上下文。
+ */
+async function initializeMissingWorkspaceFiles(context: InitContext): Promise<void> {
+  await ensureDefaultWorkspaceDirectories(context);
+  await createConfigIfMissing(context);
+  await copyDefaultAssets(context);
+}
+
+/**
+ * 覆盖默认工作区文件。
+ *
+ * @param context 初始化上下文。
+ */
+async function overwriteDefaultWorkspaceFiles(context: InitContext): Promise<void> {
+  await ensureDefaultWorkspaceDirectories(context);
+  await writeJsonFile(context.configPath, createVeawConfig(DEFAULT_PROJECT_TYPE));
+  logger.success('覆盖 config.json');
+  await copyDefaultAssets(context);
+}
+
+/**
+ * 复制默认 assets 资源到工作区。
+ *
+ * @param context 初始化上下文。
+ */
+async function copyDefaultAssets(context: InitContext): Promise<void> {
+  const result = await copyAssetsToWorkspace(context.veawDirectory);
+
+  logger.success(
+    `同步 assets：复制 ${result.copiedFiles} 个文件，跳过 ${result.skippedFiles} 个文件，创建 ${result.createdDirectories} 个目录`,
+  );
+}
+
+/**
+ * 重建工作区。
+ *
+ * @param context 初始化上下文。
+ * @param options 初始化命令选项。
+ */
+async function rebuildWorkspace(context: InitContext, options: InitOptions): Promise<void> {
+  const confirmed = await confirmWorkspaceRebuild(options);
+
+  if (!confirmed) {
+    logger.warn('Rebuild cancelled.');
+    return;
+  }
+
+  await removeDirectory(context.veawDirectory);
+  logger.warn('已删除 .veaw');
+
+  const answers = await resolveInitAnswers(context, options);
+
+  await createVeawProjectFiles(context, answers);
+  logger.success('初始化完成');
+}
+
+/**
+ * 确认是否重建工作区。
+ *
+ * @param options 初始化命令选项。
+ * @returns 是否确认重建。
+ */
+async function confirmWorkspaceRebuild(options: InitOptions): Promise<boolean> {
+  if (options.yes === true) {
+    return false;
+  }
+
+  const answers = await inquirer.prompt<RebuildConfirmAnswers>([
+    {
+      type: 'input',
+      name: 'confirmation',
+      message: '确定删除整个 .veaw 吗？请输入 yes 确认：',
+      default: '',
+      filter(value: string): string {
+        return value.trim();
+      },
+    },
+  ]);
+
+  return answers.confirmation === 'yes';
+}
+
+/**
+ * 确保默认工作区目录存在。
+ *
+ * @param context 初始化上下文。
+ */
+async function ensureDefaultWorkspaceDirectories(context: InitContext): Promise<void> {
+  for (const directoryName of DEFAULT_WORKSPACE_DIRECTORIES) {
+    await ensureWorkspaceDirectory(context, directoryName);
+  }
+}
+
+/**
+ * 确保工作区目录存在。
+ *
+ * @param context 初始化上下文。
+ * @param directoryName 目录名称。
+ */
+async function ensureWorkspaceDirectory(
+  context: InitContext,
+  directoryName: (typeof DEFAULT_WORKSPACE_DIRECTORIES)[number],
+): Promise<void> {
+  const directoryPath = path.join(context.veawDirectory, directoryName);
+
+  if (await pathExists(directoryPath)) {
+    logger.success(`保留 ${directoryName}`);
+    return;
+  }
+
+  await ensureDirectory(directoryPath);
+  logger.success(`创建 ${directoryName}`);
+}
+
+/**
+ * 在配置文件缺失时创建默认配置。
+ *
+ * @param context 初始化上下文。
+ */
+async function createConfigIfMissing(context: InitContext): Promise<void> {
+  if (await pathExists(context.configPath)) {
+    return;
+  }
+
+  await writeJsonFile(context.configPath, createVeawConfig(DEFAULT_PROJECT_TYPE));
+  logger.success('创建 config.json');
 }
 
 /**
@@ -316,4 +581,42 @@ Initialized with Veaw.
 `;
 
   await writeTextFileIfNotExists(readmePath, content);
+}
+
+/**
+ * 输出工作区保留项日志。
+ *
+ * @param context 初始化上下文。
+ */
+async function logPreservedWorkspaceItems(context: InitContext): Promise<void> {
+  for (const itemName of PRESERVED_WORKSPACE_ITEMS) {
+    const itemPath = path.join(context.veawDirectory, itemName);
+
+    await logPreservedItemIfExists(itemPath, itemName);
+  }
+}
+
+/**
+ * 输出分析数据保留项日志。
+ *
+ * @param context 初始化上下文。
+ */
+async function logPreservedAnalysisItems(context: InitContext): Promise<void> {
+  for (const itemName of PRESERVED_ANALYSIS_ITEMS) {
+    const itemPath = path.join(context.veawDirectory, itemName);
+
+    await logPreservedItemIfExists(itemPath, itemName);
+  }
+}
+
+/**
+ * 在路径存在时输出保留日志。
+ *
+ * @param itemPath 保留项路径。
+ * @param itemName 保留项名称。
+ */
+async function logPreservedItemIfExists(itemPath: string, itemName: string): Promise<void> {
+  if (await pathExists(itemPath)) {
+    logger.success(`保留 ${itemName}`);
+  }
 }

@@ -20,6 +20,15 @@ export async function ensureDirectory(directoryPath: string): Promise<void> {
 }
 
 /**
+ * 删除目录及其所有内容。
+ *
+ * @param directoryPath 目录路径。
+ */
+export async function removeDirectory(directoryPath: string): Promise<void> {
+  await fs.remove(directoryPath);
+}
+
+/**
  * 判断路径是否存在。
  *
  * @param targetPath 目标路径。
