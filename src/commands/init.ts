@@ -3,12 +3,27 @@ import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { execa } from 'execa';
 import fs from 'fs-extra';
+import {
+  ResourceResolver,
+  createResourceLockfile,
+  discoverWorkspace,
+  materializeResource,
+  readResourceLockfile,
+  readWorkspaceRegistry,
+  writeResourceLockfile,
+} from '../resource-loader/index.js';
+import type { LoadedWorkspaceRegistry, ResourceLockfile, WorkspaceResource } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
 
 /**
  * JSON 值。
  */
 type JsonValue = string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+
+/**
+ * JSON 对象。
+ */
+type JsonObject = Record<string, JsonValue>;
 
 /**
  * 包管理器类型。
@@ -196,6 +211,16 @@ interface ProjectJson {
 }
 
 /**
+ * init 命令选项。
+ */
+interface InitCommandOptions {
+  /**
+   * VEAW Workspace 路径。
+   */
+  readonly workspace?: string;
+}
+
+/**
  * 初始化上下文。
  */
 interface InitContext {
@@ -225,6 +250,32 @@ interface WriteResult {
    * 文件相对路径。
    */
   readonly relativePath: string;
+}
+
+/**
+ * Workspace 配置写入输入。
+ */
+interface WorkspaceConfigInput {
+  /**
+   * 资源模式。
+   */
+  readonly resourceMode: 'workspace' | 'fallback';
+  /**
+   * Workspace 路径。
+   */
+  readonly workspacePath?: string;
+  /**
+   * Workspace 版本。
+   */
+  readonly workspaceVersion?: string;
+  /**
+   * Registry schema 版本。
+   */
+  readonly registryVersion?: string;
+  /**
+   * CLI assets 路径。
+   */
+  readonly assetsPath?: string;
 }
 
 /**
@@ -268,23 +319,54 @@ export function registerInitCommand(program: Command): void {
   program
     .command('init')
     .description('Initialize the .veaw workspace in the current project.')
-    .action(async (): Promise<void> => {
-      await runInitCommand();
+    .option('--workspace <path>', 'Use a VEAW Workspace directory.')
+    .action(async (options: InitCommandOptions): Promise<void> => {
+      await runInitCommand(options);
     });
 }
 
 /**
  * 执行 init 命令。
+ *
+ * @param options init 命令选项。
  */
-async function runInitCommand(): Promise<void> {
+export async function runInitCommand(options: InitCommandOptions = {}): Promise<void> {
   try {
     const context = await createInitContext(process.cwd());
+    const workspaceLocation = await discoverWorkspace({
+      projectDirectory: context.targetDirectory,
+      explicitWorkspacePath: options.workspace,
+      environment: process.env,
+      fallbackAssetsDirectory: context.assetsDirectory,
+    });
 
     await ensureWorkspaceDirectories(context);
-    await copyAssetsToWorkspace(context);
-    await writeProjectJsonIfMissing(context);
-    await writeTemplateIfMissing(context, 'context.md', 'context.md');
-    await writeTemplateIfMissing(context, 'session-log.md', 'session-log.md');
+
+    if (workspaceLocation.kind === 'workspace') {
+      const registry = await readWorkspaceRegistry(workspaceLocation);
+
+      await installWorkspaceResources(context, registry);
+      await writeWorkspaceConfig(context, {
+        resourceMode: 'workspace',
+        workspacePath: workspaceLocation.rootDirectory,
+        workspaceVersion: registry.registry.workspaceVersion,
+        registryVersion: registry.registry.schemaVersion,
+      });
+      await writeOrUpdateProjectJson(context);
+      await writeTemplateFromRegistryIfMissing(context, registry, 'context', 'context.md');
+      await writeTemplateFromRegistryIfMissing(context, registry, 'session', 'session-log.md');
+      await writeResourcesLockfileIfChanged(context, registry.registry.workspaceVersion, resolveEnabledResources(registry));
+    } else {
+      await copyAssetsToWorkspace(context);
+      await writeWorkspaceConfig(context, {
+        resourceMode: 'fallback',
+        assetsPath: workspaceLocation.assetsDirectory,
+      });
+      await writeOrUpdateProjectJson(context);
+      await writeTemplateIfMissing(context, 'context.md', 'context.md');
+      await writeTemplateIfMissing(context, 'session-log.md', 'session-log.md');
+      await writeResourcesLockfileIfChanged(context, PROJECT_JSON_VERSION, []);
+    }
 
     logger.success('初始化完成');
   } catch (error: unknown) {
@@ -411,15 +493,165 @@ async function copyFileIfMissing(sourcePath: string, targetPath: string): Promis
 }
 
 /**
- * 在 project.json 缺失时写入项目画像。
+ * 安装 Workspace Registry 资源。
+ *
+ * @param context 初始化上下文。
+ * @param registry 已加载 Registry。
+ */
+async function installWorkspaceResources(context: InitContext, registry: LoadedWorkspaceRegistry): Promise<void> {
+  for (const resource of resolveEnabledResources(registry)) {
+    const result = await materializeResource({
+      workspaceDirectory: registry.location.rootDirectory,
+      projectDirectory: context.targetDirectory,
+      resource,
+    });
+
+    if (result.action === 'copied' || result.action === 'rendered') {
+      logger.success(`${result.action === 'copied' ? '创建' : '生成'} ${toDisplayPath(result.targetPath)}`);
+    }
+  }
+}
+
+/**
+ * 解析默认启用资源及其依赖。
+ *
+ * @param registry 已加载 Registry。
+ * @returns 默认启用资源闭包。
+ */
+function resolveEnabledResources(registry: LoadedWorkspaceRegistry): readonly WorkspaceResource[] {
+  const resolver = new ResourceResolver(registry.resources);
+  const enabledResourceIds = registry.resources
+    .filter((resource) => resource.enabledByDefault)
+    .map((resource) => resource.id);
+
+  return resolver.resolveDependencies(enabledResourceIds);
+}
+
+/**
+ * 写入 Workspace 配置。
+ *
+ * @param context 初始化上下文。
+ * @param input Workspace 配置输入。
+ */
+async function writeWorkspaceConfig(context: InitContext, input: WorkspaceConfigInput): Promise<void> {
+  const targetPath = path.join(context.veawDirectory, 'config.json');
+  const currentConfig = await readOptionalJsonObject(targetPath);
+  const nextConfig = mergeJsonObjects(currentConfig, createWorkspaceConfigJson(input));
+  const result = await writeJsonIfChanged(targetPath, nextConfig);
+
+  logger.success(`${result.written ? '创建' : '保留'} ${result.relativePath}`);
+}
+
+/**
+ * 创建 Workspace 配置 JSON。
+ *
+ * @param input Workspace 配置输入。
+ * @returns Workspace 配置 JSON。
+ */
+function createWorkspaceConfigJson(input: WorkspaceConfigInput): JsonObject {
+  return removeUndefinedJsonValues({
+    version: PROJECT_JSON_VERSION,
+    resourceMode: input.resourceMode,
+    workspacePath: input.workspacePath,
+    workspaceVersion: input.workspaceVersion,
+    registryVersion: input.registryVersion,
+    assetsPath: input.assetsPath,
+  });
+}
+
+/**
+ * 写入或更新 project.json，保留已有自定义字段。
  *
  * @param context 初始化上下文。
  */
-async function writeProjectJsonIfMissing(context: InitContext): Promise<void> {
+async function writeOrUpdateProjectJson(context: InitContext): Promise<void> {
   const targetPath = path.join(context.veawDirectory, 'project.json');
-  const result = await writeJsonIfMissing(targetPath, await createProjectJson(context));
+  const currentProjectJson = await readOptionalJsonObject(targetPath);
+  const nextProjectJson = await createProjectJson(context, currentProjectJson);
+  const mergedProjectJson = mergeJsonObjects(currentProjectJson, toJsonObject(nextProjectJson));
+  const result = await writeJsonIfChanged(targetPath, mergedProjectJson);
 
   logger.success(`${result.written ? '创建' : '保留'} ${result.relativePath}`);
+}
+
+/**
+ * 从 Registry 模板写入目标文件。
+ *
+ * @param context 初始化上下文。
+ * @param registry 已加载 Registry。
+ * @param tag 模板标签。
+ * @param targetFileName 目标文件名。
+ */
+async function writeTemplateFromRegistryIfMissing(
+  context: InitContext,
+  registry: LoadedWorkspaceRegistry,
+  tag: string,
+  targetFileName: string,
+): Promise<void> {
+  const resource = registry.resources.find((item) => item.type === 'template' && item.tags.includes(tag));
+
+  if (resource === undefined) {
+    logger.warn(`未找到 ${tag} 模板资源，跳过 ${targetFileName}`);
+    return;
+  }
+
+  const templatePath = path.join(registry.location.rootDirectory, resource.sourcePath);
+  const targetPath = path.join(context.veawDirectory, targetFileName);
+  const templateContent = await fs.readFile(templatePath, 'utf8');
+  const result = await writeTextIfMissing(targetPath, templateContent);
+
+  logger.success(`${result.written ? '创建' : '保留'} ${result.relativePath}`);
+}
+
+/**
+ * 写入资源 lockfile，资源未变化时保持幂等。
+ *
+ * @param context 初始化上下文。
+ * @param workspaceVersion Workspace 版本。
+ * @param resources 已安装资源。
+ */
+async function writeResourcesLockfileIfChanged(
+  context: InitContext,
+  workspaceVersion: string,
+  resources: readonly WorkspaceResource[],
+): Promise<void> {
+  const currentLockfile = await readResourceLockfile(context.targetDirectory);
+  const nextLockfile = createResourceLockfile(workspaceVersion, resources);
+  const lockfile = shouldKeepCurrentLockfile(currentLockfile, nextLockfile) ? currentLockfile : nextLockfile;
+
+  if (lockfile === undefined) {
+    return;
+  }
+
+  if (lockfile === currentLockfile) {
+    logger.success(`保留 ${toDisplayPath(path.join(context.veawDirectory, 'resources.lock.json'))}`);
+    return;
+  }
+
+  await writeResourceLockfile(context.targetDirectory, lockfile);
+  logger.success(`创建 ${toDisplayPath(path.join(context.veawDirectory, 'resources.lock.json'))}`);
+}
+
+/**
+ * 判断是否保留现有 lockfile。
+ *
+ * @param currentLockfile 当前 lockfile。
+ * @param nextLockfile 下一个 lockfile。
+ * @returns 是否保留现有 lockfile。
+ */
+function shouldKeepCurrentLockfile(
+  currentLockfile: ResourceLockfile | undefined,
+  nextLockfile: ResourceLockfile,
+): boolean {
+  if (currentLockfile === undefined) {
+    return false;
+  }
+
+  return (
+    currentLockfile.schemaVersion === nextLockfile.schemaVersion &&
+    currentLockfile.workspaceVersion === nextLockfile.workspaceVersion &&
+    JSON.stringify(currentLockfile.resources) === JSON.stringify(nextLockfile.resources)
+  );
 }
 
 /**
@@ -468,6 +700,36 @@ async function writeJsonIfMissing(filePath: string, data: unknown): Promise<Writ
 }
 
 /**
+ * JSON 内容变化时写入。
+ *
+ * @param filePath 文件路径。
+ * @param data JSON 数据。
+ * @returns 文件写入结果。
+ */
+async function writeJsonIfChanged(filePath: string, data: JsonObject): Promise<WriteResult> {
+  if (await fs.pathExists(filePath)) {
+    const currentContent = JSON.parse(await fs.readFile(filePath, 'utf8')) as unknown;
+    const currentJson = isRecord(currentContent) ? sanitizeJsonObject(currentContent) : {};
+
+    if (JSON.stringify(currentJson) === JSON.stringify(data)) {
+      return {
+        written: false,
+        relativePath: toDisplayPath(filePath),
+      };
+    }
+  }
+
+  await fs.outputJson(filePath, data, {
+    spaces: 2,
+  });
+
+  return {
+    written: true,
+    relativePath: toDisplayPath(filePath),
+  };
+}
+
+/**
  * 在文本文件缺失时写入。
  *
  * @param filePath 文件路径。
@@ -496,16 +758,17 @@ async function writeTextIfMissing(filePath: string, content: string): Promise<Wr
  * @param context 初始化上下文。
  * @returns project.json 内容。
  */
-async function createProjectJson(context: InitContext): Promise<ProjectJson> {
+async function createProjectJson(context: InitContext, currentProjectJson: JsonObject): Promise<ProjectJson> {
   const packageJson = await readPackageJsonSummary(context.targetDirectory);
   const dependencies = mergeDependencyRecords(packageJson.dependencies, packageJson.devDependencies);
   const typescript = await readTypeScriptSummary(context.targetDirectory, dependencies);
   const vite = await readViteSummary(context.targetDirectory, dependencies);
   const pnpmWorkspace = await readPnpmWorkspaceSummary(context.targetDirectory);
+  const existingGeneratedAt = readString(currentProjectJson, 'generatedAt');
 
   return {
     version: PROJECT_JSON_VERSION,
-    generatedAt: new Date().toISOString(),
+    generatedAt: existingGeneratedAt ?? new Date().toISOString(),
     root: context.targetDirectory,
     name: packageJson.name ?? path.basename(context.targetDirectory),
     frameworks: detectFrameworks(dependencies, vite),
@@ -828,6 +1091,106 @@ async function readJsonFile(filePath: string): Promise<unknown> {
 }
 
 /**
+ * 读取可选 JSON 对象。
+ *
+ * @param filePath 文件路径。
+ * @returns JSON 对象。
+ */
+async function readOptionalJsonObject(filePath: string): Promise<JsonObject> {
+  if (!(await fs.pathExists(filePath))) {
+    return {};
+  }
+
+  const content = JSON.parse(await fs.readFile(filePath, 'utf8')) as unknown;
+
+  if (!isRecord(content)) {
+    return {};
+  }
+
+  return sanitizeJsonObject(content);
+}
+
+/**
+ * 深度合并 JSON 对象，next 覆盖 current。
+ *
+ * @param current 当前对象。
+ * @param next 下一个对象。
+ * @returns 合并后的对象。
+ */
+function mergeJsonObjects(current: Readonly<Record<string, JsonValue>>, next: Readonly<Record<string, JsonValue>>): JsonObject {
+  const result: JsonObject = {
+    ...current,
+  };
+
+  for (const [key, nextValue] of Object.entries(next)) {
+    const currentValue = result[key];
+
+    if (isJsonObject(currentValue) && isJsonObject(nextValue)) {
+      result[key] = mergeJsonObjects(currentValue, nextValue);
+      continue;
+    }
+
+    result[key] = nextValue;
+  }
+
+  return result;
+}
+
+/**
+ * 将对象转成 JSON 对象。
+ *
+ * @param value 待转换值。
+ * @returns JSON 对象。
+ */
+function toJsonObject(value: unknown): JsonObject {
+  const sanitizedValue = sanitizeJsonValue(value);
+
+  if (!isJsonObject(sanitizedValue)) {
+    return {};
+  }
+
+  return sanitizedValue;
+}
+
+/**
+ * 清洗 JSON 对象。
+ *
+ * @param record 对象记录。
+ * @returns JSON 对象。
+ */
+function sanitizeJsonObject(record: Readonly<Record<string, unknown>>): JsonObject {
+  const result: JsonObject = {};
+
+  for (const [key, value] of Object.entries(record)) {
+    const sanitizedValue = sanitizeJsonValue(value);
+
+    if (sanitizedValue !== undefined) {
+      result[key] = sanitizedValue;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 移除 undefined JSON 字段。
+ *
+ * @param record 对象记录。
+ * @returns JSON 对象。
+ */
+function removeUndefinedJsonValues(record: Readonly<Record<string, JsonValue | undefined>>): JsonObject {
+  const result: JsonObject = {};
+
+  for (const [key, value] of Object.entries(record)) {
+    if (value !== undefined) {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+/**
  * 判断值是否是对象记录。
  *
  * @param value 待判断值。
@@ -835,6 +1198,16 @@ async function readJsonFile(filePath: string): Promise<unknown> {
  */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 判断值是否是 JSON 对象。
+ *
+ * @param value 待判断值。
+ * @returns 是否是 JSON 对象。
+ */
+function isJsonObject(value: unknown): value is JsonObject {
+  return isRecord(value);
 }
 
 /**
