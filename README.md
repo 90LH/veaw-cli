@@ -1,298 +1,154 @@
 # VEAW CLI
 
-> VEAW 是一个面向 AI 辅助开发的项目上下文工作区工具。它会在项目内维护 `.veaw` 工作区，沉淀项目画像、组件目录、长期上下文、实施计划提示词和 AI 开发会话记录。
+VEAW CLI 是 `Workspace -> Resource Loader -> CLI -> Project` 架构中的命令行层。它负责发现 Workspace、读取 Registry、安装资源到项目 `.veaw/`，并为 AI 生成上下文、prompt、计划和声明式命令输入。
 
-## 特性
+CLI 不直接调用第三方 AI Provider。`ask`、`plan`、Workspace command 当前都只生成 AI-ready 输入。
 
-- 初始化 `.veaw` 工作区，保留项目长期上下文。
-- 同步项目技术栈、package.json、TypeScript、Vite、Git 等元信息。
-- 扫描 Vue/TSX/JSX 组件，生成组件目录和依赖关系。
-- 生成 AI-ready prompt，用于向 AI 提问或制定实施计划。
-- 管理 AI 开发会话记录，方便跨轮次交接和回溯。
-- 不调用第三方 AI API，只生成可复制给 AI 的上下文材料。
+## Architecture
 
-## 技术栈
-
-| 技术 | 用途 |
-|------|------|
-| TypeScript | 开发语言 |
-| Commander | CLI 命令解析 |
-| Inquirer | 命令交互 |
-| Chalk | 日志输出 |
-| Ora | Loading 动画 |
-| fs-extra | 文件操作 |
-| execa | 子进程执行 |
-| zx | Shell 自动化 |
-| tsup | 打包 |
-
-## 环境要求
-
-| 软件 | 版本 |
-|------|------|
-| Node.js | >=20 |
-| pnpm | >=10 |
-
-检查版本：
-
-```bash
-node -v
-pnpm -v
+```text
+veaw Workspace
+  -> registries/*.json
+  -> Resource Loader
+  -> built-in CLI commands
+  -> project/.veaw
 ```
 
-## 本仓库开发
+Workspace 不可发现时，CLI 会回退到内置 `assets/`，保证旧项目仍可初始化。
+
+## Resource Loader
+
+Resource Loader 当前提供：
+
+- Workspace discovery：`--workspace`、`VEAW_WORKSPACE`、项目 `.veaw/config.json`、向上查找、CLI assets fallback。
+- Registry reader：读取顶层 registry 和子 registry，校验 schema version、resource sourcePath。
+- Resource resolver：按 id、type、tag 和 dependencies 解析资源。
+- Materializer：支持 `copy`、`reference`、`render`、`none`。
+- Lockfile：读写 `.veaw/resources.lock.json`。
+- Workspace command loader：读取和执行安全声明式 command。
+
+## Commands
+
+| Command | 职责 |
+|---------|------|
+| `veaw init [--workspace <path>]` | 初始化项目 `.veaw/`，优先从 Workspace Registry 安装资源，无法发现 Workspace 时使用 CLI assets fallback |
+| `veaw sync [--workspace <path>]` | 比较 Registry 与 `resources.lock.json`，增量同步新增、变更、缺失、冲突资源，并刷新项目画像 |
+| `veaw catalog` | 扫描组件目录，并从 extension/template Registry 写入可用 Catalog 资源索引 |
+| `veaw context` | 从 template/rule Registry、`project.json` 和 component catalog 生成长期上下文 |
+| `veaw ask <question>` | 从 prompt/rule/skill Registry 和项目事实组装 AI-ready prompt |
+| `veaw plan <requirement>` | 从 workflow/template/skill Registry 和项目事实生成实施计划输入 |
+| `veaw commands list [--workspace <path>]` | 列出 Workspace 声明式 command |
+| `veaw commands run <command> key=value` | 解析参数并执行安全声明式 Workspace command |
+| `veaw session ...` | 管理 `.veaw/session-log.md` 会话记录 |
+| `veaw doctor` | 检查本地环境 |
+| `veaw version` | 输出 CLI 版本 |
+
+## Built-in vs Workspace Commands
+
+内置 TypeScript command 负责稳定的 CLI 行为：
+
+- 文件创建和更新
+- Registry 读取和物化
+- 项目事实扫描
+- lockfile 增量同步
+- 参数校验和错误处理
+
+Workspace 声明式 command 负责产品级 AI 工作流入口：
+
+- command 名称、描述和参数 schema
+- 依赖资源
+- 安全 execution 类型
+- 生成 AI-ready 输入
+
+Workspace command 不允许执行任意 shell 或任意 JavaScript。
+
+当前支持的声明式 execution：
+
+- `generate-prompt`
+- `render-template`
+- `call-workflow`
+
+## Quick Start
+
+在用户项目根目录执行：
 
 ```bash
-pnpm install
+veaw init --workspace D:\test-project\AI-Workspace\veaw
+veaw sync
+veaw catalog
+veaw context
+veaw ask "如何新增一个列表页？"
+veaw plan "新增用户管理页面"
+veaw commands list
+veaw commands run new-page page_name=UserList route_path=/users description="用户列表页"
 ```
 
-开发模式运行 CLI：
-
-```bash
-pnpm dev -- --help
-pnpm dev -- init
-pnpm dev -- sync
-pnpm dev -- catalog
-pnpm dev -- context
-pnpm dev -- ask "如何理解这个项目？"
-pnpm dev -- plan "新增一个用户设置页面"
-pnpm dev -- session start "实现用户设置页面"
-pnpm dev -- doctor
-pnpm dev -- version
-```
-
-开发模式无需打包即可验证 CLI。
-
-## 构建
-
-```bash
-pnpm build
-```
-
-默认使用 **tsup** 打包，产物输出到 `dist/`。
-
-## 新项目接入手册
-
-在需要接入 VEAW 的项目根目录执行以下命令。
-
-### 1. 初始化工作区
+无 Workspace 时仍可初始化：
 
 ```bash
 veaw init
 ```
 
-会创建 `.veaw` 工作区，包含：
+这会使用 CLI 内置 `assets/` 创建兼容的 `.veaw/`。
+
+## Project Files
+
+CLI 会维护：
 
 ```text
 .veaw/
-├── assets/
-├── component-catalog/
-├── config/
-├── prompts/
-├── templates/
+├── assets/                         # fallback assets
+├── component-catalog/catalog.json
+├── config.json                     # workspace/config snapshot
 ├── context.md
-├── project.json
-└── session-log.md
+├── project.json                    # project facts, custom fields preserved
+├── resources.lock.json             # installed registry resources
+├── session-log.md
+└── resources/                      # materialized Workspace resources
 ```
 
-### 2. 同步项目画像
+## Compatibility
+
+- 旧 `.veaw/project.json` 自定义字段会保留。
+- 旧项目没有 `resources.lock.json` 时，`init` / `sync` 可迁移。
+- Workspace 丢失时，`sync` 会提示并跳过资源同步，不破坏旧项目。
+- CLI `assets/` fallback 未移除。
+
+## Development
 
 ```bash
-veaw sync
+pnpm install
+pnpm run typecheck
+pnpm run test
+pnpm run build
 ```
 
-生成或刷新 `.veaw/project.json`，记录项目名称、技术栈、包管理器、TypeScript/Vite 配置、Git 分支和 commit 等信息。
-
-### 3. 生成组件目录
+开发模式：
 
 ```bash
-veaw catalog
+pnpm run dev -- commands list --workspace D:\test-project\AI-Workspace\veaw
 ```
 
-扫描以下目录中的 `.vue`、`.tsx`、`.jsx` 组件：
+## Test Coverage
 
-```text
-src/components
-src/views
-src/layouts
-```
+当前测试覆盖：
 
-输出到 `.veaw/component-catalog/catalog.json`，包含组件名称、文件路径、Props、Emits、Slots 和依赖关系。
+- Workspace discovery 与 fallback
+- Registry schema 版本错误
+- dependency resolver
+- materializer / lockfile
+- init Workspace 初始化、fallback 初始化、旧项目字段保留、幂等性
+- sync 增量、冲突、Workspace 版本变化、旧项目迁移、Workspace 丢失
+- context / ask / plan / catalog 消费 Registry 资源
+- Workspace commands list/run、未知 command、参数非法、资源缺失、版本不兼容
 
-### 4. 生成长期上下文
+## v1.0 前仍需完成
 
-```bash
-veaw context
-```
-
-根据 `project.json` 和组件目录更新 `.veaw/context.md` 的自动生成区域。自动区域外的手写内容会保留，适合记录业务背景、架构决策和团队规范。
-
-### 5. 开始 AI 开发会话
-
-```bash
-veaw session start "实现课程详情页"
-```
-
-开发过程中追加关键记录：
-
-```bash
-veaw session log "已确认页面复用 src/components/CourseList。"
-```
-
-结束会话并写入总结：
-
-```bash
-veaw session end "课程详情页实现完成，已通过 typecheck 和 build。"
-```
-
-查看历史摘要：
-
-```bash
-veaw session list
-```
-
-### 6. 生成可复制给 AI 的上下文
-
-问答场景：
-
-```bash
-veaw ask "这个项目新增页面应该放在哪个目录？"
-```
-
-写出到文件：
-
-```bash
-veaw ask "分析课程组件依赖" --output .veaw/prompts/course-analysis.md
-```
-
-实施计划场景：
-
-```bash
-veaw plan "新增课程详情页"
-```
-
-默认写入 `.veaw/plans/<timestamp>-plan.md`。只预览不写文件：
-
-```bash
-veaw plan "新增课程详情页" --dry-run
-```
-
-指定输出路径：
-
-```bash
-veaw plan "新增课程详情页" --output .veaw/plans/course-detail-plan.md
-```
-
-### 推荐日常流程
-
-```bash
-veaw sync
-veaw catalog
-veaw context
-veaw session start "本次开发主题"
-veaw plan "本次开发需求"
-veaw ask "需要 AI 协助的问题"
-veaw session log "关键进展或决策"
-veaw session end "本次开发总结"
-```
-
-当依赖、路由、组件或目录结构发生明显变化时，重新执行 `veaw sync`、`veaw catalog`、`veaw context`。
-
-## CLI 命令
-
-| 命令 | 说明 |
-|------|------|
-| `veaw init` | 初始化 `.veaw` 工作区 |
-| `veaw sync` | 同步项目元信息到 `.veaw/project.json` |
-| `veaw catalog` | 扫描组件并生成 `.veaw/component-catalog/catalog.json` |
-| `veaw context` | 生成或刷新 `.veaw/context.md` 自动上下文 |
-| `veaw ask <question>` | 生成 AI-ready 项目上下文提示词 |
-| `veaw ask <question> --output <file>` | 将问答提示词写入文件 |
-| `veaw plan <requirement>` | 生成 AI 实施计划提示词模板 |
-| `veaw plan <requirement> --dry-run` | 只输出计划模板，不写文件 |
-| `veaw plan <requirement> --output <file>` | 将计划模板写到指定文件 |
-| `veaw session start <title>` | 开始 AI 开发会话 |
-| `veaw session log <content>` | 向当前会话追加记录 |
-| `veaw session end [summary]` | 结束当前会话并写入可选总结 |
-| `veaw session list` | 输出历史会话摘要 |
-| `veaw doctor` | 检查本地开发环境 |
-| `veaw version` | 输出 CLI 版本 |
-
-## Scripts
-
-| Script | 说明 |
-|---------|------|
-| pnpm dev | 开发模式运行 CLI |
-| pnpm build | 打包 CLI |
-| pnpm lint | ESLint 检查 |
-| pnpm test | 运行测试 |
-| pnpm typecheck | TypeScript 类型检查 |
-| pnpm prepare | 发布前自动构建 |
-
-## 推荐开发流程
-
-```text
-开发
-  │
-  ▼
-pnpm dev
-  │
-  ▼
-功能验证
-  │
-  ▼
-pnpm lint
-  │
-  ▼
-pnpm typecheck
-  │
-  ▼
-pnpm build
-  │
-  ▼
-npm publish
-```
-
-## 推荐目录结构
-
-```text
-src/
-├── commands/
-├── core/
-├── services/
-├── utils/
-├── constants/
-├── types/
-├── config/
-├── templates/
-└── index.ts
-```
-
-## 开发规范
-
-- TypeScript Strict Mode
-- ESLint
-- Prettier
-- Conventional Commits
-- Git Flow（或团队规范）
-
-## AI Coding 建议
-
-- 新命令统一放入 `commands/`
-- 公共逻辑放入 `core/` 或 `services/`
-- 保持单一职责
-- 优先复用已有实现
-- 避免重复造轮子
-- 保持命令接口兼容
-
-## Roadmap
-
-- [ ] create
-- [ ] add
-- [ ] doctor
-- [ ] update
-- [ ] plugin
-- [ ] config
-- [ ] init template marketplace
+- 更完整的资源安装状态模型：target hash、安装状态、冲突状态。
+- Project migration 命令，覆盖更多旧项目路径。
+- Registry schema 校验命令和修复建议。
+- 更细的资源选择策略：preset、tag profile、项目类型。
+- 声明式 command 的输出路径和 workflow 编排能力增强，但仍保持安全边界。
 
 ## License
 
