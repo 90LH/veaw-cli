@@ -64,6 +64,22 @@ describe('createAskPrompt', (): void => {
       /未检测到 \.veaw 工作区，请先执行 veaw init/,
     );
   });
+
+  it('includes prompt, rule, and skill resources from Workspace Registry', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryProjectDirectory();
+    const workspaceDirectory = await createWorkspaceFixture('veaw-ask-workspace-');
+
+    await createVeawWorkspace(projectDirectory, workspaceDirectory);
+
+    const prompt = await createAskPrompt(projectDirectory, '如何创建列表页？');
+
+    assert.match(prompt, /prompt:list-page/);
+    assert.match(prompt, /Workspace List Prompt/);
+    assert.match(prompt, /rule:vue3/);
+    assert.match(prompt, /Workspace Vue Rule/);
+    assert.match(prompt, /skill:vue-page-create/);
+    assert.match(prompt, /Workspace Vue Page Skill/);
+  });
 });
 
 describe('runAskCommand', (): void => {
@@ -116,7 +132,7 @@ async function createTemporaryProjectDirectory(): Promise<string> {
  *
  * @param projectDirectory 项目目录路径。
  */
-async function createVeawWorkspace(projectDirectory: string): Promise<void> {
+async function createVeawWorkspace(projectDirectory: string, workspaceDirectory?: string): Promise<void> {
   const veawDirectory = path.join(projectDirectory, '.veaw');
 
   await fs.ensureDir(path.join(veawDirectory, 'component-catalog'));
@@ -124,4 +140,169 @@ async function createVeawWorkspace(projectDirectory: string): Promise<void> {
   await writeFile(path.join(veawDirectory, 'project.json'), '{"frameworks":["Vue","Vite"]}');
   await writeFile(path.join(veawDirectory, 'component-catalog', 'catalog.json'), '{"components":[]}');
   await writeFile(path.join(veawDirectory, 'session-log.md'), '# Session Log');
+
+  if (workspaceDirectory !== undefined) {
+    await writeJsonFile(path.join(veawDirectory, 'config.json'), {
+      workspacePath: workspaceDirectory,
+    });
+  }
+}
+
+/**
+ * 创建最小 Workspace fixture。
+ *
+ * @param prefix 目录名前缀。
+ * @returns Workspace 目录。
+ */
+async function createWorkspaceFixture(prefix: string): Promise<string> {
+  const workspaceDirectory = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const registriesDirectory = path.join(workspaceDirectory, 'registries');
+
+  temporaryDirectories.push(workspaceDirectory);
+
+  await fs.ensureDir(registriesDirectory);
+  await writeFile(path.join(workspaceDirectory, 'workspace.json'), '{"name":"VEAW"}');
+  await writeFile(path.join(workspaceDirectory, 'list-prompt.md'), '# Workspace List Prompt');
+  await writeFile(path.join(workspaceDirectory, 'vue-rule.md'), '# Workspace Vue Rule');
+  await writeFile(path.join(workspaceDirectory, 'vue-page-skill.md'), '# Workspace Vue Page Skill');
+  await writeJsonFile(path.join(registriesDirectory, 'registry.json'), {
+    schemaVersion: '1.0.0',
+    workspaceVersion: '1.0.0',
+    workspace: {
+      id: 'veaw',
+      name: 'VEAW',
+      rootMarker: 'workspace.json',
+    },
+    registries: [
+      {
+        id: 'prompts',
+        type: 'prompt',
+        path: 'prompts.json',
+        required: true,
+      },
+      {
+        id: 'rules',
+        type: 'rule',
+        path: 'rules.json',
+        required: true,
+      },
+      {
+        id: 'skills',
+        type: 'skill',
+        path: 'skills.json',
+        required: true,
+      },
+    ],
+  });
+  await writeResourceRegistry(registriesDirectory, 'prompts.json', 'prompt', [
+    createResource({
+      id: 'prompt:list-page',
+      type: 'prompt',
+      sourcePath: 'list-prompt.md',
+      targetPath: '.veaw/resources/prompts/list-page.md',
+      tags: ['prompt', 'list', 'page'],
+    }),
+  ]);
+  await writeResourceRegistry(registriesDirectory, 'rules.json', 'rule', [
+    createResource({
+      id: 'rule:vue3',
+      type: 'rule',
+      sourcePath: 'vue-rule.md',
+      targetPath: '.veaw/resources/rules/vue-rule.md',
+      tags: ['rule', 'vue'],
+    }),
+  ]);
+  await writeResourceRegistry(registriesDirectory, 'skills.json', 'skill', [
+    createResource({
+      id: 'skill:vue-page-create',
+      type: 'skill',
+      sourcePath: 'vue-page-skill.md',
+      targetPath: '.veaw/resources/skills/vue-page-create.md',
+      tags: ['skill', 'vue', 'page'],
+    }),
+  ]);
+
+  return workspaceDirectory;
+}
+
+/**
+ * 写入资源 Registry。
+ *
+ * @param registriesDirectory registries 目录。
+ * @param fileName 文件名。
+ * @param resourceType 资源类型。
+ * @param resources 资源列表。
+ */
+async function writeResourceRegistry(
+  registriesDirectory: string,
+  fileName: string,
+  resourceType: string,
+  resources: readonly Record<string, unknown>[],
+): Promise<void> {
+  await writeJsonFile(path.join(registriesDirectory, fileName), {
+    schemaVersion: '1.0.0',
+    workspaceVersion: '1.0.0',
+    resourceType,
+    resources,
+  });
+}
+
+/**
+ * 资源输入。
+ */
+interface ResourceInput {
+  /**
+   * 资源 id。
+   */
+  readonly id: string;
+  /**
+   * 资源类型。
+   */
+  readonly type: string;
+  /**
+   * 源路径。
+   */
+  readonly sourcePath: string;
+  /**
+   * 目标路径。
+   */
+  readonly targetPath: string;
+  /**
+   * 标签。
+   */
+  readonly tags: readonly string[];
+}
+
+/**
+ * 创建 Registry 资源。
+ *
+ * @param input 资源输入。
+ * @returns Registry 资源。
+ */
+function createResource(input: ResourceInput): Record<string, unknown> {
+  return {
+    id: input.id,
+    type: input.type,
+    version: '1.0.0',
+    sourcePath: input.sourcePath,
+    targetPath: input.targetPath,
+    tags: input.tags,
+    dependencies: [],
+    enabledByDefault: true,
+    copyPolicy: 'reference',
+    overwritePolicy: 'if-missing',
+    hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  };
+}
+
+/**
+ * 写入 JSON 文件。
+ *
+ * @param filePath 文件路径。
+ * @param data JSON 数据。
+ */
+async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
+  await fs.outputJson(filePath, data, {
+    spaces: 2,
+  });
 }

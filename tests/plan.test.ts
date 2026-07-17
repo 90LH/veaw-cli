@@ -29,9 +29,10 @@ describe('generatePlanTemplate', (): void => {
     assert.match(template, /## 1\. 需求原文/);
     assert.match(template, /## 2\. 项目背景和技术栈/);
     assert.match(template, /## 3\. 相关现有组件与依赖关系/);
-    assert.match(template, /## 4\. 推荐修改\/新增文件/);
-    assert.match(template, /## 5\. 实施步骤/);
-    assert.match(template, /## 6\. 风险、兼容性影响与验收标准/);
+    assert.match(template, /## 4\. Workspace 工作流、模板与技能/);
+    assert.match(template, /## 5\. 推荐修改\/新增文件/);
+    assert.match(template, /## 6\. 实施步骤/);
+    assert.match(template, /## 7\. 风险、兼容性影响与验收标准/);
     assert.match(template, /新增用户权限配置页面/);
     assert.match(template, /不调用第三方 AI API/);
   });
@@ -49,6 +50,32 @@ describe('createPlanTemplate', (): void => {
     assert.match(template, /"frameworks":\["Vue","Vite"\]/);
     assert.match(template, /"components":\[\]/);
     assert.match(template, /优化课程卡片交互/);
+  });
+
+  it('includes workflow, template, and skill resources from Workspace Registry', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryProjectDirectory();
+    const workspaceDirectory = await createWorkspaceFixture('veaw-plan-workspace-');
+
+    await createVeawWorkspace(projectDirectory, workspaceDirectory);
+
+    const template = await createPlanTemplate(projectDirectory, '新增列表页');
+
+    assert.match(template, /workflow:feature-development/);
+    assert.match(template, /Workspace Feature Workflow/);
+    assert.match(template, /template:vue-page/);
+    assert.match(template, /Workspace Vue Page Template/);
+    assert.match(template, /skill:vue-page-create/);
+    assert.match(template, /Workspace Vue Page Skill/);
+  });
+
+  it('keeps current fallback plan content when Workspace is unavailable', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryProjectDirectory();
+
+    await createVeawWorkspace(projectDirectory);
+
+    const template = await createPlanTemplate(projectDirectory, '新增页面');
+
+    assert.match(template, /未发现可用 Workspace Registry 资源/);
   });
 
   it('throws remediation command when .veaw is missing', async (): Promise<void> => {
@@ -174,11 +201,176 @@ async function createTemporaryProjectDirectory(): Promise<string> {
  *
  * @param projectDirectory 项目目录路径。
  */
-async function createVeawWorkspace(projectDirectory: string): Promise<void> {
+async function createVeawWorkspace(projectDirectory: string, workspaceDirectory?: string): Promise<void> {
   const veawDirectory = path.join(projectDirectory, '.veaw');
 
   await fs.ensureDir(path.join(veawDirectory, 'component-catalog'));
   await writeFile(path.join(veawDirectory, 'context.md'), '# Demo Context');
   await writeFile(path.join(veawDirectory, 'project.json'), '{"frameworks":["Vue","Vite"]}');
   await writeFile(path.join(veawDirectory, 'component-catalog', 'catalog.json'), '{"components":[]}');
+
+  if (workspaceDirectory !== undefined) {
+    await writeJsonFile(path.join(veawDirectory, 'config.json'), {
+      workspacePath: workspaceDirectory,
+    });
+  }
+}
+
+/**
+ * 创建最小 Workspace fixture。
+ *
+ * @param prefix 目录名前缀。
+ * @returns Workspace 目录。
+ */
+async function createWorkspaceFixture(prefix: string): Promise<string> {
+  const workspaceDirectory = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const registriesDirectory = path.join(workspaceDirectory, 'registries');
+
+  temporaryDirectories.push(workspaceDirectory);
+
+  await fs.ensureDir(registriesDirectory);
+  await writeFile(path.join(workspaceDirectory, 'workspace.json'), '{"name":"VEAW"}');
+  await writeFile(path.join(workspaceDirectory, 'feature-workflow.md'), '# Workspace Feature Workflow');
+  await writeFile(path.join(workspaceDirectory, 'vue-page-template.md'), '# Workspace Vue Page Template');
+  await writeFile(path.join(workspaceDirectory, 'vue-page-skill.md'), '# Workspace Vue Page Skill');
+  await writeJsonFile(path.join(registriesDirectory, 'registry.json'), {
+    schemaVersion: '1.0.0',
+    workspaceVersion: '1.0.0',
+    workspace: {
+      id: 'veaw',
+      name: 'VEAW',
+      rootMarker: 'workspace.json',
+    },
+    registries: [
+      {
+        id: 'workflows',
+        type: 'workflow',
+        path: 'workflows.json',
+        required: true,
+      },
+      {
+        id: 'templates',
+        type: 'template',
+        path: 'templates.json',
+        required: true,
+      },
+      {
+        id: 'skills',
+        type: 'skill',
+        path: 'skills.json',
+        required: true,
+      },
+    ],
+  });
+  await writeResourceRegistry(registriesDirectory, 'workflows.json', 'workflow', [
+    createResource({
+      id: 'workflow:feature-development',
+      type: 'workflow',
+      sourcePath: 'feature-workflow.md',
+      targetPath: '.veaw/resources/workflows/feature-development.md',
+      tags: ['workflow', 'feature'],
+    }),
+  ]);
+  await writeResourceRegistry(registriesDirectory, 'templates.json', 'template', [
+    createResource({
+      id: 'template:vue-page',
+      type: 'template',
+      sourcePath: 'vue-page-template.md',
+      targetPath: '.veaw/resources/templates/vue-page.md',
+      tags: ['template', 'vue', 'page'],
+    }),
+  ]);
+  await writeResourceRegistry(registriesDirectory, 'skills.json', 'skill', [
+    createResource({
+      id: 'skill:vue-page-create',
+      type: 'skill',
+      sourcePath: 'vue-page-skill.md',
+      targetPath: '.veaw/resources/skills/vue-page-create.md',
+      tags: ['skill', 'vue', 'page'],
+    }),
+  ]);
+
+  return workspaceDirectory;
+}
+
+/**
+ * 写入资源 Registry。
+ *
+ * @param registriesDirectory registries 目录。
+ * @param fileName 文件名。
+ * @param resourceType 资源类型。
+ * @param resources 资源列表。
+ */
+async function writeResourceRegistry(
+  registriesDirectory: string,
+  fileName: string,
+  resourceType: string,
+  resources: readonly Record<string, unknown>[],
+): Promise<void> {
+  await writeJsonFile(path.join(registriesDirectory, fileName), {
+    schemaVersion: '1.0.0',
+    workspaceVersion: '1.0.0',
+    resourceType,
+    resources,
+  });
+}
+
+/**
+ * 资源输入。
+ */
+interface ResourceInput {
+  /**
+   * 资源 id。
+   */
+  readonly id: string;
+  /**
+   * 资源类型。
+   */
+  readonly type: string;
+  /**
+   * 源路径。
+   */
+  readonly sourcePath: string;
+  /**
+   * 目标路径。
+   */
+  readonly targetPath: string;
+  /**
+   * 标签。
+   */
+  readonly tags: readonly string[];
+}
+
+/**
+ * 创建 Registry 资源。
+ *
+ * @param input 资源输入。
+ * @returns Registry 资源。
+ */
+function createResource(input: ResourceInput): Record<string, unknown> {
+  return {
+    id: input.id,
+    type: input.type,
+    version: '1.0.0',
+    sourcePath: input.sourcePath,
+    targetPath: input.targetPath,
+    tags: input.tags,
+    dependencies: [],
+    enabledByDefault: true,
+    copyPolicy: 'reference',
+    overwritePolicy: 'if-missing',
+    hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  };
+}
+
+/**
+ * 写入 JSON 文件。
+ *
+ * @param filePath 文件路径。
+ * @param data JSON 数据。
+ */
+async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
+  await fs.outputJson(filePath, data, {
+    spaces: 2,
+  });
 }

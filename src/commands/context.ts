@@ -1,6 +1,12 @@
 import path from 'node:path';
 import { Command } from 'commander';
 import fs from 'fs-extra';
+import {
+  discoverWorkspace,
+  readResourceContents,
+  readWorkspaceRegistry,
+} from '../resource-loader/index.js';
+import type { ResourceContent } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -130,6 +136,20 @@ interface ContextCommandContext {
 }
 
 /**
+ * Workspace context 资源集合。
+ */
+interface WorkspaceContextResources {
+  /**
+   * 模板资源。
+   */
+  readonly templates: readonly ResourceContent[];
+  /**
+   * 规则资源。
+   */
+  readonly rules: readonly ResourceContent[];
+}
+
+/**
  * VEAW 工作区目录名。
  */
 const VEAW_DIRECTORY_NAME = '.veaw';
@@ -161,13 +181,14 @@ export function registerContextCommand(program: Command): void {
 /**
  * 执行 context 命令。
  */
-async function runContextCommand(): Promise<void> {
+export async function runContextCommand(): Promise<void> {
   try {
     const context = await createContextCommandContext(process.cwd());
     const projectJson = await readJsonObject(context.projectJsonPath, 'project.json');
     const catalogJson = await readOptionalJsonObject(context.catalogJsonPath);
     const components = readCatalogComponents(catalogJson);
-    const generatedContent = generateContextMarkdown(projectJson, components);
+    const resources = await readWorkspaceContextResources(context.targetDirectory);
+    const generatedContent = generateContextMarkdown(projectJson, components, resources);
     const nextContent = await mergeContextContent(context.contextPath, generatedContent);
 
     await fs.outputFile(context.contextPath, nextContent);
@@ -285,7 +306,11 @@ function readCatalogComponent(component: Readonly<Record<string, unknown>>): Cat
  * @param components 组件目录项。
  * @returns 自动生成 Markdown 内容。
  */
-function generateContextMarkdown(projectJson: JsonObject, components: readonly CatalogComponent[]): string {
+function generateContextMarkdown(
+  projectJson: JsonObject,
+  components: readonly CatalogComponent[],
+  resources: WorkspaceContextResources,
+): string {
   const stats = createComponentStats(components);
   const categories = categorizeComponents(components);
   const generatedAt = new Date().toISOString();
@@ -314,6 +339,14 @@ function generateContextMarkdown(projectJson: JsonObject, components: readonly C
     '',
     createDevelopmentConventions(projectJson),
     '',
+    '## Workspace 模板',
+    '',
+    createResourceContentMarkdown(resources.templates),
+    '',
+    '## Workspace 规则',
+    '',
+    createResourceContentMarkdown(resources.rules),
+    '',
     '## 组件统计',
     '',
     createComponentStatsMarkdown(stats),
@@ -329,6 +362,68 @@ function generateContextMarkdown(projectJson: JsonObject, components: readonly C
     AUTO_CONTEXT_END,
     '',
   ].join('\n');
+}
+
+/**
+ * 读取 Workspace context 资源。
+ *
+ * @param targetDirectory 项目根目录。
+ * @returns Workspace context 资源。
+ */
+async function readWorkspaceContextResources(targetDirectory: string): Promise<WorkspaceContextResources> {
+  const location = await discoverWorkspace({
+    projectDirectory: targetDirectory,
+    environment: process.env,
+  });
+
+  if (location.kind !== 'workspace') {
+    return {
+      templates: [],
+      rules: [],
+    };
+  }
+
+  const registry = await readWorkspaceRegistry(location);
+
+  return {
+    templates: await readResourceContents(registry, {
+      types: ['template'],
+      tags: ['context', 'project'],
+      enabledOnly: true,
+    }),
+    rules: await readResourceContents(registry, {
+      types: ['rule'],
+      enabledOnly: true,
+    }),
+  };
+}
+
+/**
+ * 创建资源内容 Markdown。
+ *
+ * @param resources 资源内容列表。
+ * @returns Markdown 内容。
+ */
+function createResourceContentMarkdown(resources: readonly ResourceContent[]): string {
+  if (resources.length === 0) {
+    return '- 当前未发现 Workspace Registry 资源，已使用 CLI fallback 内容。';
+  }
+
+  return resources
+    .map((resource) =>
+      [
+        `### ${resource.resource.id}`,
+        '',
+        `- type：${resource.resource.type}`,
+        `- version：${resource.resource.version}`,
+        `- tags：${resource.resource.tags.join(', ')}`,
+        '',
+        '```markdown',
+        resource.content.trim(),
+        '```',
+      ].join('\n'),
+    )
+    .join('\n\n');
 }
 
 /**

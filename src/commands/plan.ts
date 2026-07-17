@@ -1,5 +1,11 @@
 import path from 'node:path';
 import { Command } from 'commander';
+import {
+  discoverWorkspace,
+  readResourceContents,
+  readWorkspaceRegistry,
+} from '../resource-loader/index.js';
+import type { ResourceContent } from '../resource-loader/index.js';
 import { ensureDirectory, pathExists, readTextFile, writeTextFile } from '../utils/file.js';
 import { logger } from '../utils/logger.js';
 
@@ -65,6 +71,18 @@ interface GeneratePlanTemplateInput extends PlanContext {
    * 需求原文。
    */
   readonly requirement: string;
+  /**
+   * Workspace workflow 资源内容。
+   */
+  readonly workflowResources?: readonly ResourceContent[];
+  /**
+   * Workspace template 资源内容。
+   */
+  readonly templateResources?: readonly ResourceContent[];
+  /**
+   * Workspace skill 资源内容。
+   */
+  readonly skillResources?: readonly ResourceContent[];
 }
 
 /**
@@ -160,10 +178,14 @@ export async function createPlanTemplate(targetDirectory: string, requirement: s
   await ensureVeawWorkspace(veawDirectory);
 
   const planContext = await readPlanContext(veawDirectory);
+  const workspaceResources = await readPlanWorkspaceResources(targetDirectory);
 
   return generatePlanTemplate({
     requirement,
     ...planContext,
+    workflowResources: workspaceResources.workflows,
+    templateResources: workspaceResources.templates,
+    skillResources: workspaceResources.skills,
   });
 }
 
@@ -199,7 +221,21 @@ export function generatePlanTemplate(input: GeneratePlanTemplateInput): string {
     '',
     createFencedSection(input.catalogContent, 'json'),
     '',
-    '## 4. 推荐修改/新增文件',
+    '## 4. Workspace 工作流、模板与技能',
+    '',
+    '### Workflows',
+    '',
+    createResourceSections(input.workflowResources),
+    '',
+    '### Templates',
+    '',
+    createResourceSections(input.templateResources),
+    '',
+    '### Skills',
+    '',
+    createResourceSections(input.skillResources),
+    '',
+    '## 5. 推荐修改/新增文件',
     '',
     '请输出建议修改或新增的文件清单，并说明每个文件的职责：',
     '',
@@ -208,7 +244,7 @@ export function generatePlanTemplate(input: GeneratePlanTemplateInput): string {
     '- 测试文件：',
     '- 文档或配置文件：',
     '',
-    '## 5. 实施步骤',
+    '## 6. 实施步骤',
     '',
     '请按可执行顺序拆分步骤，每一步说明目标、关键改动、涉及文件和验证方式。',
     '',
@@ -218,7 +254,7 @@ export function generatePlanTemplate(input: GeneratePlanTemplateInput): string {
     '4. 业务逻辑或 composable 调整：',
     '5. 测试与验证：',
     '',
-    '## 6. 风险、兼容性影响与验收标准',
+    '## 7. 风险、兼容性影响与验收标准',
     '',
     '请补全以下内容：',
     '',
@@ -237,6 +273,90 @@ export function generatePlanTemplate(input: GeneratePlanTemplateInput): string {
     '- 如果上下文不足，请明确列出缺口和需要用户补充的信息。',
     '',
   ].join('\n');
+}
+
+/**
+ * plan 需要的 Workspace 资源。
+ */
+interface PlanWorkspaceResources {
+  /**
+   * workflows Registry 内容。
+   */
+  readonly workflows: readonly ResourceContent[];
+  /**
+   * templates Registry 内容。
+   */
+  readonly templates: readonly ResourceContent[];
+  /**
+   * skills Registry 内容。
+   */
+  readonly skills: readonly ResourceContent[];
+}
+
+/**
+ * 读取 plan 需要的 Workspace Registry 资源。
+ *
+ * @param targetDirectory 目标项目目录。
+ * @returns Workspace 资源。
+ */
+async function readPlanWorkspaceResources(targetDirectory: string): Promise<PlanWorkspaceResources> {
+  const location = await discoverWorkspace({
+    projectDirectory: targetDirectory,
+    environment: process.env,
+  });
+
+  if (location.kind !== 'workspace') {
+    return {
+      workflows: [],
+      templates: [],
+      skills: [],
+    };
+  }
+
+  const registry = await readWorkspaceRegistry(location);
+
+  return {
+    workflows: await readResourceContents(registry, {
+      types: ['workflow'],
+      enabledOnly: true,
+    }),
+    templates: await readResourceContents(registry, {
+      types: ['template'],
+      enabledOnly: true,
+    }),
+    skills: await readResourceContents(registry, {
+      types: ['skill'],
+      enabledOnly: true,
+    }),
+  };
+}
+
+/**
+ * 创建 Registry 资源内容章节。
+ *
+ * @param resources Registry 资源内容。
+ * @returns Markdown 内容。
+ */
+function createResourceSections(resources: readonly ResourceContent[] | undefined): string {
+  if (resources === undefined || resources.length === 0) {
+    return '未发现可用 Workspace Registry 资源，继续使用 CLI fallback 计划模板。';
+  }
+
+  return resources
+    .map((resource) =>
+      [
+        `#### ${resource.resource.id}`,
+        '',
+        `- type：${resource.resource.type}`,
+        `- version：${resource.resource.version}`,
+        `- tags：${resource.resource.tags.join(', ')}`,
+        '',
+        '```markdown',
+        resource.content.trim(),
+        '```',
+      ].join('\n'),
+    )
+    .join('\n\n');
 }
 
 /**

@@ -1,6 +1,12 @@
 import path from 'node:path';
 import { Command } from 'commander';
 import fs from 'fs-extra';
+import {
+  discoverWorkspace,
+  readWorkspaceRegistry,
+  selectResources,
+} from '../resource-loader/index.js';
+import type { WorkspaceResource } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -153,9 +159,51 @@ interface ComponentCatalog {
    */
   readonly scanRoots: readonly string[];
   /**
+   * Registry 中可用的 catalog 相关资源。
+   */
+  readonly availableResources: readonly CatalogResourceSummary[];
+  /**
    * 组件列表。
    */
   readonly components: readonly CatalogComponent[];
+}
+
+/**
+ * Catalog Registry 资源摘要。
+ */
+interface CatalogResourceSummary {
+  /**
+   * 资源 id。
+   */
+  readonly id: string;
+  /**
+   * 资源类型。
+   */
+  readonly type: string;
+  /**
+   * 资源版本。
+   */
+  readonly version: string;
+  /**
+   * 资源标签。
+   */
+  readonly tags: readonly string[];
+  /**
+   * 资源依赖。
+   */
+  readonly dependencies: readonly string[];
+  /**
+   * 是否默认启用。
+   */
+  readonly enabledByDefault: boolean;
+  /**
+   * 复制策略。
+   */
+  readonly copyPolicy: string;
+  /**
+   * 目标路径。
+   */
+  readonly targetPath: string;
 }
 
 /**
@@ -236,7 +284,7 @@ export function registerCatalogCommand(program: Command): void {
 /**
  * 执行 catalog 命令。
  */
-async function runCatalogCommand(): Promise<void> {
+export async function runCatalogCommand(): Promise<void> {
   try {
     const context = createCatalogContext(process.cwd());
     const componentFiles = await scanComponentFiles(context.targetDirectory);
@@ -246,8 +294,9 @@ async function runCatalogCommand(): Promise<void> {
       componentPathSet,
     };
     const components = await analyzeComponents(componentFiles, analyzeContext);
+    const availableResources = await readCatalogRegistryResources(context.targetDirectory);
     const existingCatalog = await readExistingCatalog(context.catalogPath);
-    const nextCatalog = mergeCatalog(existingCatalog, components);
+    const nextCatalog = mergeCatalog(existingCatalog, components, availableResources);
 
     await fs.ensureDir(context.componentCatalogDirectory);
     await fs.outputJson(context.catalogPath, nextCatalog, {
@@ -278,6 +327,50 @@ function createCatalogContext(targetDirectory: string): CatalogContext {
     veawDirectory,
     componentCatalogDirectory,
     catalogPath: path.join(componentCatalogDirectory, 'catalog.json'),
+  };
+}
+
+/**
+ * 读取 catalog 可用 Registry 资源。
+ *
+ * @param targetDirectory 项目根目录。
+ * @returns catalog 资源摘要。
+ */
+async function readCatalogRegistryResources(targetDirectory: string): Promise<readonly CatalogResourceSummary[]> {
+  const location = await discoverWorkspace({
+    projectDirectory: targetDirectory,
+    environment: process.env,
+  });
+
+  if (location.kind !== 'workspace') {
+    return [];
+  }
+
+  const registry = await readWorkspaceRegistry(location);
+  const resources = selectResources(registry.resources, {
+    types: ['extension', 'extension-guide', 'extension-template', 'template'],
+    tags: ['catalog'],
+  });
+
+  return resources.map(createCatalogResourceSummary);
+}
+
+/**
+ * 创建 catalog 资源摘要。
+ *
+ * @param resource Workspace 资源。
+ * @returns catalog 资源摘要。
+ */
+function createCatalogResourceSummary(resource: WorkspaceResource): CatalogResourceSummary {
+  return {
+    id: resource.id,
+    type: resource.type,
+    version: resource.version,
+    tags: resource.tags,
+    dependencies: resource.dependencies,
+    enabledByDefault: resource.enabledByDefault,
+    copyPolicy: resource.copyPolicy,
+    targetPath: resource.targetPath,
   };
 }
 
@@ -1095,7 +1188,11 @@ async function readExistingCatalog(catalogPath: string): Promise<JsonObject | un
  * @param components 最新组件列表。
  * @returns 合并后的 catalog。
  */
-function mergeCatalog(existingCatalog: JsonObject | undefined, components: readonly CatalogComponent[]): JsonObject {
+function mergeCatalog(
+  existingCatalog: JsonObject | undefined,
+  components: readonly CatalogComponent[],
+  availableResources: readonly CatalogResourceSummary[],
+): JsonObject {
   const now = new Date().toISOString();
   const existingComponents = readExistingComponents(existingCatalog);
   const mergedComponents = mergeComponents(existingComponents, components);
@@ -1104,6 +1201,7 @@ function mergeCatalog(existingCatalog: JsonObject | undefined, components: reado
     generatedAt: readExistingString(existingCatalog, 'generatedAt') ?? now,
     updatedAt: now,
     scanRoots: SCAN_ROOTS,
+    availableResources,
     components: mergedComponents,
   };
 

@@ -1,5 +1,11 @@
 import path from 'node:path';
 import { Command } from 'commander';
+import {
+  discoverWorkspace,
+  readResourceContents,
+  readWorkspaceRegistry,
+} from '../resource-loader/index.js';
+import type { ResourceContent } from '../resource-loader/index.js';
 import { pathExists, readTextFile, writeTextFile } from '../utils/file.js';
 import { logger } from '../utils/logger.js';
 
@@ -55,6 +61,18 @@ interface GeneratePromptInput {
    * session-log.md 内容。
    */
   readonly sessionLogContent?: string;
+  /**
+   * Workspace prompt 资源内容。
+   */
+  readonly promptResources?: readonly ResourceContent[];
+  /**
+   * Workspace rule 资源内容。
+   */
+  readonly ruleResources?: readonly ResourceContent[];
+  /**
+   * Workspace skill 资源内容。
+   */
+  readonly skillResources?: readonly ResourceContent[];
 }
 
 /**
@@ -126,6 +144,7 @@ export async function createAskPrompt(targetDirectory: string, question: string)
   }
 
   const sourceFiles = await readPromptSourceFiles(veawDirectory);
+  const workspaceResources = await readAskWorkspaceResources(targetDirectory);
   const missingFiles = sourceFiles
     .filter((sourceFile) => sourceFile.content === undefined)
     .map((sourceFile) => sourceFile.displayName);
@@ -140,6 +159,9 @@ export async function createAskPrompt(targetDirectory: string, question: string)
     projectContent: findSourceContent(sourceFiles, 'project.json'),
     catalogContent: findSourceContent(sourceFiles, 'component-catalog/catalog.json'),
     sessionLogContent: findSourceContent(sourceFiles, 'session-log.md'),
+    promptResources: workspaceResources.prompts,
+    ruleResources: workspaceResources.rules,
+    skillResources: workspaceResources.skills,
   });
 }
 
@@ -171,6 +193,18 @@ export function generateAskPrompt(input: GeneratePromptInput): string {
     '',
     createFencedSection(input.sessionLogContent, 'markdown'),
     '',
+    '## Workspace Prompts',
+    '',
+    createResourceSections(input.promptResources),
+    '',
+    '## Workspace Rules',
+    '',
+    createResourceSections(input.ruleResources),
+    '',
+    '## Workspace Skills',
+    '',
+    createResourceSections(input.skillResources),
+    '',
     '## 用户问题',
     '',
     input.question,
@@ -186,6 +220,90 @@ export function generateAskPrompt(input: GeneratePromptInput): string {
     '- 如果上下文不足，请先说明缺口，再给出保守建议。',
     '',
   ].join('\n');
+}
+
+/**
+ * ask 需要的 Workspace 资源。
+ */
+interface AskWorkspaceResources {
+  /**
+   * prompts Registry 内容。
+   */
+  readonly prompts: readonly ResourceContent[];
+  /**
+   * rules Registry 内容。
+   */
+  readonly rules: readonly ResourceContent[];
+  /**
+   * skills Registry 内容。
+   */
+  readonly skills: readonly ResourceContent[];
+}
+
+/**
+ * 读取 ask 需要的 Workspace Registry 资源。
+ *
+ * @param targetDirectory 目标项目目录。
+ * @returns Workspace 资源。
+ */
+async function readAskWorkspaceResources(targetDirectory: string): Promise<AskWorkspaceResources> {
+  const location = await discoverWorkspace({
+    projectDirectory: targetDirectory,
+    environment: process.env,
+  });
+
+  if (location.kind !== 'workspace') {
+    return {
+      prompts: [],
+      rules: [],
+      skills: [],
+    };
+  }
+
+  const registry = await readWorkspaceRegistry(location);
+
+  return {
+    prompts: await readResourceContents(registry, {
+      types: ['prompt'],
+      enabledOnly: true,
+    }),
+    rules: await readResourceContents(registry, {
+      types: ['rule'],
+      enabledOnly: true,
+    }),
+    skills: await readResourceContents(registry, {
+      types: ['skill'],
+      enabledOnly: true,
+    }),
+  };
+}
+
+/**
+ * 创建 Registry 资源内容章节。
+ *
+ * @param resources Registry 资源内容。
+ * @returns Markdown 内容。
+ */
+function createResourceSections(resources: readonly ResourceContent[] | undefined): string {
+  if (resources === undefined || resources.length === 0) {
+    return MISSING_SECTION_TEXT;
+  }
+
+  return resources
+    .map((resource) =>
+      [
+        `### ${resource.resource.id}`,
+        '',
+        `- type：${resource.resource.type}`,
+        `- version：${resource.resource.version}`,
+        `- tags：${resource.resource.tags.join(', ')}`,
+        '',
+        '```markdown',
+        resource.content.trim(),
+        '```',
+      ].join('\n'),
+    )
+    .join('\n\n');
 }
 
 /**
