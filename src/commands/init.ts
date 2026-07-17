@@ -5,6 +5,7 @@ import { execa } from 'execa';
 import fs from 'fs-extra';
 import {
   ResourceResolver,
+  createProjectProfileFromProjectJson,
   createResourceLockfile,
   discoverWorkspace,
   hashFile,
@@ -352,8 +353,9 @@ export async function runInitCommand(options: InitCommandOptions = {}): Promise<
 
     if (workspaceLocation.kind === 'workspace') {
       const registry = await readWorkspaceRegistry(workspaceLocation);
+      const selectedResources = await resolveEnabledResources(context, registry);
 
-      const materializeActions = await installWorkspaceResources(context, registry);
+      const materializeActions = await installWorkspaceResources(context, registry, selectedResources);
       await writeWorkspaceConfig(context, {
         resourceMode: 'workspace',
         workspacePath: workspaceLocation.rootDirectory,
@@ -366,7 +368,7 @@ export async function runInitCommand(options: InitCommandOptions = {}): Promise<
       await writeResourcesLockfileIfChanged(
         context,
         registry.registry.workspaceVersion,
-        resolveEnabledResources(registry),
+        selectedResources,
         materializeActions,
       );
     } else {
@@ -514,10 +516,11 @@ async function copyFileIfMissing(sourcePath: string, targetPath: string): Promis
 async function installWorkspaceResources(
   context: InitContext,
   registry: LoadedWorkspaceRegistry,
+  resources: readonly WorkspaceResource[],
 ): Promise<ReadonlyMap<string, MaterializeAction>> {
   const actions = new Map<string, MaterializeAction>();
 
-  for (const resource of resolveEnabledResources(registry)) {
+  for (const resource of resources) {
     const result = await materializeResource({
       workspaceDirectory: registry.location.rootDirectory,
       projectDirectory: context.targetDirectory,
@@ -537,16 +540,22 @@ async function installWorkspaceResources(
 /**
  * 解析默认启用资源及其依赖。
  *
+ * @param context 初始化上下文。
  * @param registry 已加载 Registry。
  * @returns 默认启用资源闭包。
  */
-function resolveEnabledResources(registry: LoadedWorkspaceRegistry): readonly WorkspaceResource[] {
+async function resolveEnabledResources(
+  context: InitContext,
+  registry: LoadedWorkspaceRegistry,
+): Promise<readonly WorkspaceResource[]> {
   const resolver = new ResourceResolver(registry.resources);
-  const enabledResourceIds = registry.resources
-    .filter((resource) => resource.enabledByDefault)
-    .map((resource) => resource.id);
+  const currentProjectJson = await readOptionalJsonObject(path.join(context.veawDirectory, 'project.json'));
+  const projectJson = await createProjectJson(context, currentProjectJson);
+  const profile = createProjectProfileFromProjectJson(projectJson);
 
-  return resolver.resolveDependencies(enabledResourceIds);
+  return resolver.resolveSelection({
+    profile,
+  }).resources;
 }
 
 /**

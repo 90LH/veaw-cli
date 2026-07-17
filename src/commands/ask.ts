@@ -1,11 +1,12 @@
 import path from 'node:path';
 import { Command } from 'commander';
 import {
+  createProjectProfileFromProjectJson,
   discoverWorkspace,
   readResourceContents,
   readWorkspaceRegistry,
 } from '../resource-loader/index.js';
-import type { ResourceContent } from '../resource-loader/index.js';
+import type { ProjectProfile, ResourceContent } from '../resource-loader/index.js';
 import { pathExists, readTextFile, writeTextFile } from '../utils/file.js';
 import { logger } from '../utils/logger.js';
 
@@ -144,7 +145,10 @@ export async function createAskPrompt(targetDirectory: string, question: string)
   }
 
   const sourceFiles = await readPromptSourceFiles(veawDirectory);
-  const workspaceResources = await readAskWorkspaceResources(targetDirectory);
+  const workspaceResources = await readAskWorkspaceResources(
+    targetDirectory,
+    readProjectProfileFromContent(findSourceContent(sourceFiles, 'project.json')),
+  );
   const missingFiles = sourceFiles
     .filter((sourceFile) => sourceFile.content === undefined)
     .map((sourceFile) => sourceFile.displayName);
@@ -246,7 +250,10 @@ interface AskWorkspaceResources {
  * @param targetDirectory 目标项目目录。
  * @returns Workspace 资源。
  */
-async function readAskWorkspaceResources(targetDirectory: string): Promise<AskWorkspaceResources> {
+async function readAskWorkspaceResources(
+  targetDirectory: string,
+  profile: ProjectProfile | undefined,
+): Promise<AskWorkspaceResources> {
   const location = await discoverWorkspace({
     projectDirectory: targetDirectory,
     environment: process.env,
@@ -266,16 +273,37 @@ async function readAskWorkspaceResources(targetDirectory: string): Promise<AskWo
     prompts: await readResourceContents(registry, {
       types: ['prompt'],
       enabledOnly: true,
+      profile,
     }),
     rules: await readResourceContents(registry, {
       types: ['rule'],
       enabledOnly: true,
+      profile,
     }),
     skills: await readResourceContents(registry, {
       types: ['skill'],
       enabledOnly: true,
+      profile,
     }),
   };
+}
+
+/**
+ * 从 project.json 内容读取资源选择 profile。
+ *
+ * @param content project.json 内容。
+ * @returns 项目 profile。
+ */
+function readProjectProfileFromContent(content: string | undefined): ProjectProfile | undefined {
+  if (content === undefined) {
+    return undefined;
+  }
+
+  try {
+    return createProjectProfileFromProjectJson(JSON.parse(content) as unknown);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

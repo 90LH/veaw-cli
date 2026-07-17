@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'fs-extra';
 import { ResourceResolver } from './resolver.js';
-import type { LoadedWorkspaceRegistry, WorkspaceResource } from './types.js';
+import type { LoadedWorkspaceRegistry, ProjectProfile, WorkspaceResource } from './types.js';
 
 /**
  * Registry 资源内容查询。
@@ -27,6 +27,10 @@ export interface ResourceContentQuery {
    * 是否解析依赖闭包。
    */
   readonly includeDependencies?: boolean;
+  /**
+   * Project profile used when enabledOnly should follow preset/profile selection.
+   */
+  readonly profile?: ProjectProfile;
 }
 
 /**
@@ -80,7 +84,11 @@ export function selectResources(
   resources: readonly WorkspaceResource[],
   query: ResourceContentQuery,
 ): readonly WorkspaceResource[] {
-  const baseResources = resources
+  const candidateResources =
+    query.enabledOnly === true && query.profile !== undefined
+      ? new ResourceResolver(resources).resolveSelection({ profile: query.profile }).resources
+      : resources;
+  const baseResources = candidateResources
     .filter((resource) => matchesResource(resource, query))
     .sort((left, right) => left.id.localeCompare(right.id));
 
@@ -101,7 +109,7 @@ export function selectResources(
  * @returns 是否匹配。
  */
 function matchesResource(resource: WorkspaceResource, query: ResourceContentQuery): boolean {
-  if (query.enabledOnly === true && !resource.enabledByDefault) {
+  if (query.enabledOnly === true && query.profile === undefined && !resource.enabledByDefault) {
     return false;
   }
 

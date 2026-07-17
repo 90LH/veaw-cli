@@ -2,11 +2,12 @@ import path from 'node:path';
 import { Command } from 'commander';
 import fs from 'fs-extra';
 import {
+  createProjectProfileFromProjectJson,
   discoverWorkspace,
   readResourceContents,
   readWorkspaceRegistry,
 } from '../resource-loader/index.js';
-import type { ResourceContent } from '../resource-loader/index.js';
+import type { ProjectProfile, ResourceContent } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -187,7 +188,10 @@ export async function runContextCommand(): Promise<void> {
     const projectJson = await readJsonObject(context.projectJsonPath, 'project.json');
     const catalogJson = await readOptionalJsonObject(context.catalogJsonPath);
     const components = readCatalogComponents(catalogJson);
-    const resources = await readWorkspaceContextResources(context.targetDirectory);
+    const resources = await readWorkspaceContextResources(
+      context.targetDirectory,
+      createProjectProfileFromProjectJson(projectJson),
+    );
     const generatedContent = generateContextMarkdown(projectJson, components, resources);
     const nextContent = await mergeContextContent(context.contextPath, generatedContent);
 
@@ -370,7 +374,10 @@ function generateContextMarkdown(
  * @param targetDirectory 项目根目录。
  * @returns Workspace context 资源。
  */
-async function readWorkspaceContextResources(targetDirectory: string): Promise<WorkspaceContextResources> {
+async function readWorkspaceContextResources(
+  targetDirectory: string,
+  profile: ProjectProfile | undefined,
+): Promise<WorkspaceContextResources> {
   const location = await discoverWorkspace({
     projectDirectory: targetDirectory,
     environment: process.env,
@@ -390,10 +397,12 @@ async function readWorkspaceContextResources(targetDirectory: string): Promise<W
       types: ['template'],
       tags: ['context', 'project'],
       enabledOnly: true,
+      profile,
     }),
     rules: await readResourceContents(registry, {
       types: ['rule'],
       enabledOnly: true,
+      profile,
     }),
   };
 }

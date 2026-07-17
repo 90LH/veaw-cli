@@ -4,13 +4,23 @@ export type { ResourceContent, ResourceContentQuery } from './content.js';
 export {
   createResourceLockfile,
   hashFile,
+  hashText,
   readResourceLockfile,
   resolveResourceLockfilePath,
   writeResourceLockfile,
 } from './lockfile.js';
 export { materializeResource, renderTemplate } from './materializer.js';
 export { readWorkspaceRegistry } from './registry.js';
-export { ResourceResolver } from './resolver.js';
+export { ResourceResolver, createProjectProfileFromProjectJson } from './resolver.js';
+export { validateProject, validateVeaw, validateWorkspaceRegistry } from './validator.js';
+export type {
+  ValidateVeawInput,
+  ValidationIssue,
+  ValidationIssueCode,
+  ValidationResult,
+  ValidationSeverity,
+  ValidationSummary,
+} from './validator.js';
 export {
   executeWorkspaceCommand,
   findWorkspaceCommand,
@@ -33,14 +43,22 @@ export type {
   MaterializeAction,
   MaterializeResourceInput,
   MaterializeResourceResult,
+  ProjectProfile,
+  ProjectProfileValue,
   ResourceCopyPolicy,
+  ResourceConflictCondition,
   ResourceLockEntry,
   ResourceLockLastAction,
   ResourceLockStatus,
   ResourceLockfile,
   ResourceOverwritePolicy,
+  ResourceProfileCondition,
   ResourceQuery,
   ResourceRegistry,
+  ResourceSelectionDecision,
+  ResourceSelectionDecisionStatus,
+  ResourceSelectionInput,
+  ResourceSelectionResult,
   VeawProjectConfig,
   WorkspaceDiscoveryOptions,
   WorkspaceDiscoverySource,

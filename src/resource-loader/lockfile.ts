@@ -68,6 +68,16 @@ export async function writeResourceLockfile(projectDirectory: string, lockfile: 
 export async function hashFile(filePath: string): Promise<string> {
   const content = await fs.readFile(filePath);
 
+  return hashText(content);
+}
+
+/**
+ * 计算文本或二进制内容 SHA-256。
+ *
+ * @param content 文件内容。
+ * @returns hash 字符串。
+ */
+export function hashText(content: string | Buffer): string {
   return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 

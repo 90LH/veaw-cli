@@ -4,12 +4,15 @@ import { execa } from 'execa';
 import fs from 'fs-extra';
 import {
   ResourceResolver,
+  createProjectProfileFromProjectJson,
   createResourceLockfile,
   discoverWorkspace,
   hashFile,
+  hashText,
   materializeResource,
   readResourceLockfile,
   readWorkspaceRegistry,
+  renderTemplate,
   writeResourceLockfile,
 } from '../resource-loader/index.js';
 import type {
@@ -229,6 +232,24 @@ interface SyncCommandOptions {
    * VEAW Workspace 路径。
    */
   readonly workspace?: string;
+  /**
+   * 首次资源同步时写入 resources.lock.json 并应用安全变更。
+   */
+  readonly writeLockfile?: boolean;
+  /**
+   * 仅扫描和报告，不写入资源或 lockfile。
+   */
+  readonly dryRun?: boolean;
+}
+
+/**
+ * 资源同步执行结果。
+ */
+interface ResourceSyncResult {
+  /**
+   * 是否允许写入 project.json。
+   */
+  readonly shouldWriteProjectJson: boolean;
 }
 
 /**
@@ -338,6 +359,8 @@ export function registerSyncCommand(program: Command): void {
     .command('sync')
     .description('Sync project metadata into .veaw/project.json.')
     .option('--workspace <path>', 'Use a VEAW Workspace directory.')
+    .option('--write-lockfile', 'Opt in to write .veaw/resources.lock.json during the first legacy resource sync.')
+    .option('--dry-run', 'Scan resources and report without writing resource files or lockfile.')
     .action(async (options: SyncCommandOptions): Promise<void> => {
       await runSyncCommand(options);
     });
@@ -351,15 +374,17 @@ export function registerSyncCommand(program: Command): void {
 export async function runSyncCommand(options: SyncCommandOptions = {}): Promise<void> {
   try {
     const context = await createSyncContext(process.cwd());
-    const currentProjectJson = await readExistingProjectJson(context.projectJsonPath);
-    const nextProjectJson = await createProjectJson(context);
-    const mergedProjectJson = mergeProjectJson(currentProjectJson, nextProjectJson);
+    const resourceSyncResult = await syncWorkspaceResources(context, options);
 
-    await fs.outputJson(context.projectJsonPath, mergedProjectJson, {
-      spaces: 2,
-    });
+    if (resourceSyncResult.shouldWriteProjectJson) {
+      const currentProjectJson = await readExistingProjectJson(context.projectJsonPath);
+      const nextProjectJson = await createProjectJson(context);
+      const mergedProjectJson = mergeProjectJson(currentProjectJson, nextProjectJson);
 
-    await syncWorkspaceResources(context, options);
+      await fs.outputJson(context.projectJsonPath, mergedProjectJson, {
+        spaces: 2,
+      });
+    }
 
     logger.success('项目信息同步完成');
   } catch (error: unknown) {
@@ -397,7 +422,7 @@ async function createSyncContext(targetDirectory: string): Promise<SyncContext> 
  * @param context 同步上下文。
  * @param options sync 命令选项。
  */
-async function syncWorkspaceResources(context: SyncContext, options: SyncCommandOptions): Promise<void> {
+async function syncWorkspaceResources(context: SyncContext, options: SyncCommandOptions): Promise<ResourceSyncResult> {
   const workspaceLocation = await discoverWorkspace({
     projectDirectory: context.targetDirectory,
     explicitWorkspacePath: options.workspace,
@@ -413,12 +438,19 @@ async function syncWorkspaceResources(context: SyncContext, options: SyncCommand
         : `配置的 Workspace 不可用：${configuredWorkspacePath}，已跳过资源同步。`;
 
     logger.warn(hint);
-    return;
+    return {
+      shouldWriteProjectJson: true,
+    };
   }
 
   const registry = await readWorkspaceRegistry(workspaceLocation);
-  const desiredResources = resolveEnabledResources(registry);
+  const desiredResources = await resolveEnabledResources(context, registry);
   const currentLockfile = await readResourceLockfile(context.targetDirectory);
+
+  if (currentLockfile === undefined) {
+    return syncFirstWorkspaceResources(context, registry, desiredResources, options);
+  }
+
   const summary = await materializeChangedResources(context, registry, desiredResources, currentLockfile);
 
   await writeWorkspaceConfig(context, {
@@ -431,6 +463,10 @@ async function syncWorkspaceResources(context: SyncContext, options: SyncCommand
   logger.success(
     `资源同步完成：已安装 ${summary.installedCount}，已修改 ${summary.modifiedCount}，缺失 ${summary.missingCount}，冲突 ${summary.conflictCount}，跳过 ${summary.skippedCount}`,
   );
+
+  return {
+    shouldWriteProjectJson: true,
+  };
 }
 
 /**
@@ -439,13 +475,389 @@ async function syncWorkspaceResources(context: SyncContext, options: SyncCommand
  * @param registry 已加载 Registry。
  * @returns 默认启用资源闭包。
  */
-function resolveEnabledResources(registry: LoadedWorkspaceRegistry): readonly WorkspaceResource[] {
+async function resolveEnabledResources(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+): Promise<readonly WorkspaceResource[]> {
   const resolver = new ResourceResolver(registry.resources);
-  const enabledResourceIds = registry.resources
-    .filter((resource) => resource.enabledByDefault)
-    .map((resource) => resource.id);
+  const projectJson = await readExistingProjectJson(context.projectJsonPath);
+  const profile = createProjectProfileFromProjectJson(projectJson);
 
-  return resolver.resolveDependencies(enabledResourceIds);
+  return resolver.resolveSelection({
+    profile,
+  }).resources;
+}
+
+/**
+ * 首次资源同步分类。
+ */
+type FirstSyncClassification = 'safe-install' | 'needs-adoption' | 'conflict' | 'unknown';
+
+/**
+ * 首次资源同步候选。
+ */
+interface FirstSyncCandidate {
+  /**
+   * Workspace 资源。
+   */
+  readonly resource: WorkspaceResource;
+  /**
+   * 资源分类。
+   */
+  readonly classification: FirstSyncClassification;
+  /**
+   * 目标文件路径。
+   */
+  readonly targetPath?: string;
+  /**
+   * 当前目标 hash。
+   */
+  readonly targetHash?: string;
+  /**
+   * 预期物化内容 hash。
+   */
+  readonly expectedTargetHash?: string;
+  /**
+   * 无法判断原因。
+   */
+  readonly reason?: string;
+}
+
+/**
+ * 首次资源同步摘要。
+ */
+interface FirstSyncSummary {
+  /**
+   * 可安全安装数量。
+   */
+  readonly safeInstallCount: number;
+  /**
+   * 需要认领数量。
+   */
+  readonly needsAdoptionCount: number;
+  /**
+   * 用户文件冲突数量。
+   */
+  readonly conflictCount: number;
+  /**
+   * 无法判断数量。
+   */
+  readonly unknownCount: number;
+}
+
+/**
+ * 首次同步 Workspace 资源。
+ *
+ * @param context 同步上下文。
+ * @param registry 已加载 Registry。
+ * @param desiredResources Registry 期望资源。
+ * @param options sync 命令选项。
+ * @returns 资源同步结果。
+ */
+async function syncFirstWorkspaceResources(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+  desiredResources: readonly WorkspaceResource[],
+  options: SyncCommandOptions,
+): Promise<ResourceSyncResult> {
+  const candidates = await scanFirstSyncCandidates(context, registry, desiredResources);
+  const summary = countFirstSyncCandidates(candidates);
+  const shouldApply = options.writeLockfile === true && options.dryRun !== true;
+
+  logger.warn(
+    `首次资源同步扫描：可安全安装 ${summary.safeInstallCount}，需要认领 ${summary.needsAdoptionCount}，冲突 ${summary.conflictCount}，无法判断 ${summary.unknownCount}`,
+  );
+
+  if (!shouldApply) {
+    logger.warn('未写入 resources.lock.json；如需应用首次同步结果，请重新运行 veaw sync --write-lockfile。');
+
+    return {
+      shouldWriteProjectJson: false,
+    };
+  }
+
+  await applyFirstSyncCandidates(context, registry, candidates);
+  await writeWorkspaceConfig(context, {
+    resourceMode: 'workspace',
+    workspacePath: registry.location.rootDirectory,
+    workspaceVersion: registry.registry.workspaceVersion,
+    registryVersion: registry.registry.schemaVersion,
+  });
+
+  return {
+    shouldWriteProjectJson: true,
+  };
+}
+
+/**
+ * 扫描首次同步候选资源。
+ *
+ * @param context 同步上下文。
+ * @param registry 已加载 Registry。
+ * @param desiredResources Registry 期望资源。
+ * @returns 首次同步候选列表。
+ */
+async function scanFirstSyncCandidates(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+  desiredResources: readonly WorkspaceResource[],
+): Promise<readonly FirstSyncCandidate[]> {
+  const candidates: FirstSyncCandidate[] = [];
+
+  for (const resource of desiredResources) {
+    candidates.push(await scanFirstSyncCandidate(context, registry, resource));
+  }
+
+  return candidates;
+}
+
+/**
+ * 扫描单个首次同步候选资源。
+ *
+ * @param context 同步上下文。
+ * @param registry 已加载 Registry。
+ * @param resource Workspace 资源。
+ * @returns 首次同步候选。
+ */
+async function scanFirstSyncCandidate(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+  resource: WorkspaceResource,
+): Promise<FirstSyncCandidate> {
+  const targetPath = resolveContainedPath(context.targetDirectory, resource.targetPath);
+  const sourcePath = resolveContainedPath(registry.location.rootDirectory, resource.sourcePath);
+
+  if (targetPath === undefined) {
+    return createUnknownFirstSyncCandidate(resource, 'targetPath is outside the project directory');
+  }
+
+  if (sourcePath === undefined) {
+    return createUnknownFirstSyncCandidate(resource, 'sourcePath is outside the Workspace directory');
+  }
+
+  if (resource.copyPolicy !== 'copy' && resource.copyPolicy !== 'render') {
+    return createUnknownFirstSyncCandidate(resource, `copyPolicy=${resource.copyPolicy} cannot be compared`);
+  }
+
+  const expectedTargetHash = await readExpectedTargetHash(sourcePath, resource);
+
+  if (!(await fs.pathExists(targetPath))) {
+    return {
+      resource,
+      classification: 'safe-install',
+      targetPath,
+      expectedTargetHash,
+    };
+  }
+
+  const targetHash = await hashFile(targetPath);
+
+  return {
+    resource,
+    classification: targetHash === expectedTargetHash ? 'needs-adoption' : 'conflict',
+    targetPath,
+    targetHash,
+    expectedTargetHash,
+  };
+}
+
+/**
+ * 创建无法判断候选。
+ *
+ * @param resource Workspace 资源。
+ * @param reason 原因。
+ * @returns 首次同步候选。
+ */
+function createUnknownFirstSyncCandidate(resource: WorkspaceResource, reason: string): FirstSyncCandidate {
+  return {
+    resource,
+    classification: 'unknown',
+    reason,
+  };
+}
+
+/**
+ * 读取资源预期目标 hash。
+ *
+ * @param sourcePath 源文件路径。
+ * @param resource Workspace 资源。
+ * @returns 预期目标 hash。
+ */
+async function readExpectedTargetHash(sourcePath: string, resource: WorkspaceResource): Promise<string> {
+  if (resource.copyPolicy === 'copy') {
+    return resource.hash;
+  }
+
+  const content = await fs.readFile(sourcePath, 'utf8');
+
+  return hashText(renderTemplate(content, {}));
+}
+
+/**
+ * 解析并限制路径在根目录内。
+ *
+ * @param rootDirectory 根目录。
+ * @param relativePath 相对路径。
+ * @returns 安全路径。
+ */
+function resolveContainedPath(rootDirectory: string, relativePath: string): string | undefined {
+  const rootPath = path.resolve(rootDirectory);
+  const targetPath = path.resolve(rootPath, relativePath);
+  const relativeToRoot = path.relative(rootPath, targetPath);
+
+  if (relativeToRoot.length === 0 || (!relativeToRoot.startsWith('..') && !path.isAbsolute(relativeToRoot))) {
+    return targetPath;
+  }
+
+  return undefined;
+}
+
+/**
+ * 应用首次同步候选。
+ *
+ * @param context 同步上下文。
+ * @param registry 已加载 Registry。
+ * @param candidates 首次同步候选。
+ */
+async function applyFirstSyncCandidates(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+  candidates: readonly FirstSyncCandidate[],
+): Promise<void> {
+  const entries: ResourceLockEntry[] = [];
+
+  for (const candidate of candidates) {
+    const entry = await applyFirstSyncCandidate(context, registry, candidate);
+
+    if (entry !== undefined) {
+      entries.push(entry);
+    }
+  }
+
+  await writeResourceLockfile(
+    context.targetDirectory,
+    createLockfileWithEntries(registry.registry.workspaceVersion, undefined, entries),
+  );
+  logger.success(`创建 ${toDisplayPath(path.join(context.veawDirectory, 'resources.lock.json'))}`);
+}
+
+/**
+ * 应用单个首次同步候选。
+ *
+ * @param context 同步上下文。
+ * @param registry 已加载 Registry。
+ * @param candidate 首次同步候选。
+ * @returns lockfile 条目。
+ */
+async function applyFirstSyncCandidate(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+  candidate: FirstSyncCandidate,
+): Promise<ResourceLockEntry | undefined> {
+  if (candidate.classification === 'safe-install') {
+    return installFirstSyncCandidate(context, registry, candidate);
+  }
+
+  if (candidate.classification === 'needs-adoption') {
+    logger.success(`认领 ${candidate.resource.id}`);
+    return createResourceLockEntry(candidate.resource, undefined, candidate.targetHash, 'installed');
+  }
+
+  if (candidate.classification === 'conflict') {
+    return applyFirstSyncConflict(context, registry, candidate);
+  }
+
+  logger.warn(`跳过 ${candidate.resource.id}：${candidate.reason ?? '无法判断'}`);
+  return createResourceLockEntry(candidate.resource, undefined, candidate.targetHash, 'skipped');
+}
+
+/**
+ * 安装首次同步安全候选。
+ *
+ * @param context 同步上下文。
+ * @param registry 已加载 Registry。
+ * @param candidate 首次同步候选。
+ * @returns lockfile 条目。
+ */
+async function installFirstSyncCandidate(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+  candidate: FirstSyncCandidate,
+): Promise<ResourceLockEntry> {
+  const result = await materializeResource({
+    workspaceDirectory: registry.location.rootDirectory,
+    projectDirectory: context.targetDirectory,
+    resource: candidate.resource,
+  });
+
+  const targetHash =
+    result.targetPath !== undefined && (await fs.pathExists(result.targetPath))
+      ? await hashFile(result.targetPath)
+      : candidate.targetHash;
+
+  if (result.action === 'copied' || result.action === 'rendered') {
+    logger.success(`${result.action === 'copied' ? '创建' : '生成'} ${toDisplayPath(result.targetPath)}`);
+    return createResourceLockEntry(candidate.resource, undefined, targetHash, 'installed');
+  }
+
+  return createResourceLockEntry(candidate.resource, undefined, targetHash, 'skipped');
+}
+
+/**
+ * 应用首次同步冲突候选。
+ *
+ * @param context 同步上下文。
+ * @param registry 已加载 Registry。
+ * @param candidate 首次同步候选。
+ * @returns lockfile 条目。
+ */
+async function applyFirstSyncConflict(
+  context: SyncContext,
+  registry: LoadedWorkspaceRegistry,
+  candidate: FirstSyncCandidate,
+): Promise<ResourceLockEntry> {
+  if (candidate.resource.overwritePolicy !== 'always' && candidate.resource.overwritePolicy !== 'managed-block') {
+    logger.warn(`保留 ${candidate.resource.id}：项目文件与 Workspace 内容不同`);
+    return createResourceLockEntry(candidate.resource, undefined, candidate.targetHash, 'conflict');
+  }
+
+  const result = await materializeResource({
+    workspaceDirectory: registry.location.rootDirectory,
+    projectDirectory: context.targetDirectory,
+    resource: candidate.resource,
+  });
+  const targetHash = (await fs.pathExists(result.targetPath)) ? await hashFile(result.targetPath) : candidate.targetHash;
+
+  return createResourceLockEntry(candidate.resource, undefined, targetHash, targetHash === undefined ? 'missing' : 'installed');
+}
+
+/**
+ * 统计首次同步候选。
+ *
+ * @param candidates 首次同步候选。
+ * @returns 首次同步摘要。
+ */
+function countFirstSyncCandidates(candidates: readonly FirstSyncCandidate[]): FirstSyncSummary {
+  return {
+    safeInstallCount: countFirstSyncClassification(candidates, 'safe-install'),
+    needsAdoptionCount: countFirstSyncClassification(candidates, 'needs-adoption'),
+    conflictCount: countFirstSyncClassification(candidates, 'conflict'),
+    unknownCount: countFirstSyncClassification(candidates, 'unknown'),
+  };
+}
+
+/**
+ * 统计指定首次同步分类数量。
+ *
+ * @param candidates 首次同步候选。
+ * @param classification 目标分类。
+ * @returns 数量。
+ */
+function countFirstSyncClassification(
+  candidates: readonly FirstSyncCandidate[],
+  classification: FirstSyncClassification,
+): number {
+  return candidates.filter((candidate) => candidate.classification === classification).length;
 }
 
 /**

@@ -4,6 +4,7 @@ import { registerCatalogCommand } from './commands/catalog.js';
 import { registerContextCommand } from './commands/context.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerInitCommand } from './commands/init.js';
+import { registerMigrateCommand } from './commands/migrate.js';
 import { registerPlanCommand } from './commands/plan.js';
 import { registerSessionCommand } from './commands/session.js';
 import { registerSyncCommand } from './commands/sync.js';
@@ -22,6 +23,7 @@ program
 
 registerAskCommand(program);
 registerInitCommand(program);
+registerMigrateCommand(program);
 registerSyncCommand(program);
 registerCatalogCommand(program);
 registerContextCommand(program);

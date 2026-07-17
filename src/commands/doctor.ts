@@ -1,5 +1,7 @@
 import { Command } from 'commander';
 import ora from 'ora';
+import { validateVeaw } from '../resource-loader/index.js';
+import type { ValidationResult } from '../resource-loader/index.js';
 import { runCommand } from '../utils/shell.js';
 import { logger } from '../utils/logger.js';
 
@@ -22,6 +24,24 @@ interface DoctorCheckResult {
 }
 
 /**
+ * doctor 命令选项。
+ */
+interface DoctorCommandOptions {
+  /**
+   * 校验 Registry 与 Project。
+   */
+  readonly registry?: boolean;
+  /**
+   * 输出 JSON。
+   */
+  readonly json?: boolean;
+  /**
+   * 显式 Workspace 路径。
+   */
+  readonly workspace?: string;
+}
+
+/**
  * 注册 doctor 命令。
  *
  * @param program Commander 主程序实例。
@@ -30,15 +50,25 @@ export function registerDoctorCommand(program: Command): void {
   program
     .command('doctor')
     .description('Check the local development environment.')
-    .action(async (): Promise<void> => {
-      await runDoctorCommand();
+    .option('--registry', 'Validate Workspace registries and current project lockfile.')
+    .option('--workspace <path>', 'Use a VEAW Workspace directory for registry validation.')
+    .option('--json', 'Print machine-readable JSON output.')
+    .action(async (options: DoctorCommandOptions): Promise<void> => {
+      await runDoctorCommand(options);
     });
 }
 
 /**
  * 执行 doctor 命令。
+ *
+ * @param options doctor 命令选项。
  */
-async function runDoctorCommand(): Promise<void> {
+export async function runDoctorCommand(options: DoctorCommandOptions = {}): Promise<void> {
+  if (options.registry === true) {
+    await runRegistryDoctor(options);
+    return;
+  }
+
   const spinner = ora('Checking environment...').start();
   const results = await Promise.all([checkNodeVersion(), checkPackageManager()]);
 
@@ -59,6 +89,50 @@ async function runDoctorCommand(): Promise<void> {
   }
 
   process.exitCode = 1;
+}
+
+/**
+ * 执行 Registry doctor。
+ *
+ * @param options doctor 命令选项。
+ */
+async function runRegistryDoctor(options: DoctorCommandOptions): Promise<void> {
+  const result = await validateVeaw({
+    projectDirectory: process.cwd(),
+    workspaceDirectory: options.workspace,
+  });
+
+  if (options.json === true) {
+    console.log(JSON.stringify(result, undefined, 2));
+  } else {
+    printValidationSummary(result);
+  }
+
+  process.exitCode = result.exitCode;
+}
+
+/**
+ * 输出校验摘要。
+ *
+ * @param result 校验结果。
+ */
+function printValidationSummary(result: ValidationResult): void {
+  if (result.ok) {
+    logger.success('Registry validation passed.');
+  } else {
+    logger.error(`Registry validation failed: ${result.summary.errorCount} error(s), ${result.summary.warningCount} warning(s).`);
+  }
+
+  for (const issue of result.issues) {
+    const message = `${issue.code} ${issue.path}: ${issue.message}`;
+
+    if (issue.severity === 'error') {
+      logger.error(message);
+      continue;
+    }
+
+    logger.warn(message);
+  }
 }
 
 /**

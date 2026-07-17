@@ -245,6 +245,153 @@ describe('runSyncCommand', (): void => {
     assert.equal(lockEntries[0]?.status, 'skipped');
   });
 
+  it('scans legacy projects without lockfile without writing resources by default', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-sync-first-scan-');
+    const workspaceDirectory = await createWorkspaceFixture({
+      prefix: 'veaw-sync-workspace-',
+      resources: [
+        createFixtureResource({
+          id: 'prompt:base',
+          fileName: 'base.md',
+          content: '# Base',
+        }),
+      ],
+    });
+
+    await fs.ensureDir(path.join(projectDirectory, '.veaw'));
+    await writeProjectConfig(projectDirectory, workspaceDirectory);
+
+    await runSyncInDirectory(projectDirectory);
+
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'resources.lock.json')), false);
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'project.json')), false);
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'resources', 'prompts', 'base.md')), false);
+  });
+
+  it('adopts same-content resources only after explicit opt-in', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-sync-first-adopt-');
+    const workspaceDirectory = await createWorkspaceFixture({
+      prefix: 'veaw-sync-workspace-',
+      resources: [
+        createFixtureResource({
+          id: 'prompt:base',
+          fileName: 'base.md',
+          content: '# Base',
+        }),
+      ],
+    });
+    const targetPath = path.join(projectDirectory, '.veaw', 'resources', 'prompts', 'base.md');
+
+    await fs.ensureDir(path.dirname(targetPath));
+    await writeProjectConfig(projectDirectory, workspaceDirectory);
+    await writeFile(targetPath, '# Base');
+
+    await runSyncInDirectory(projectDirectory);
+
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'resources.lock.json')), false);
+
+    await runSyncInDirectory(projectDirectory, {
+      writeLockfile: true,
+    });
+
+    const targetContent = await readFile(targetPath, 'utf8');
+    const lockfile = await readJsonObject(path.join(projectDirectory, '.veaw', 'resources.lock.json'));
+    const lockEntries = readLockEntries(lockfile);
+
+    assert.equal(targetContent, '# Base');
+    assert.equal(lockEntries[0]?.sourceHash, hashText('# Base'));
+    assert.equal(lockEntries[0]?.targetHash, hashText('# Base'));
+    assert.equal(lockEntries[0]?.status, 'installed');
+  });
+
+  it('records different-content resources as conflicts after opt-in without overwriting them', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-sync-first-conflict-');
+    const workspaceDirectory = await createWorkspaceFixture({
+      prefix: 'veaw-sync-workspace-',
+      resources: [
+        createFixtureResource({
+          id: 'prompt:base',
+          fileName: 'base.md',
+          content: '# Workspace Base',
+        }),
+      ],
+    });
+    const targetPath = path.join(projectDirectory, '.veaw', 'resources', 'prompts', 'base.md');
+
+    await fs.ensureDir(path.dirname(targetPath));
+    await writeProjectConfig(projectDirectory, workspaceDirectory);
+    await writeFile(targetPath, '# User Base');
+
+    await runSyncInDirectory(projectDirectory, {
+      writeLockfile: true,
+    });
+
+    const targetContent = await readFile(targetPath, 'utf8');
+    const lockfile = await readJsonObject(path.join(projectDirectory, '.veaw', 'resources.lock.json'));
+    const lockEntries = readLockEntries(lockfile);
+
+    assert.equal(targetContent, '# User Base');
+    assert.equal(lockEntries[0]?.sourceHash, hashText('# Workspace Base'));
+    assert.equal(lockEntries[0]?.targetHash, hashText('# User Base'));
+    assert.equal(lockEntries[0]?.status, 'conflict');
+  });
+
+  it('installs missing targets after first-sync opt-in', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-sync-first-install-');
+    const workspaceDirectory = await createWorkspaceFixture({
+      prefix: 'veaw-sync-workspace-',
+      resources: [
+        createFixtureResource({
+          id: 'prompt:base',
+          fileName: 'base.md',
+          content: '# Base',
+        }),
+      ],
+    });
+    const targetPath = path.join(projectDirectory, '.veaw', 'resources', 'prompts', 'base.md');
+
+    await fs.ensureDir(path.join(projectDirectory, '.veaw'));
+    await writeProjectConfig(projectDirectory, workspaceDirectory);
+
+    await runSyncInDirectory(projectDirectory, {
+      writeLockfile: true,
+    });
+
+    const targetContent = await readFile(targetPath, 'utf8');
+    const lockfile = await readJsonObject(path.join(projectDirectory, '.veaw', 'resources.lock.json'));
+    const lockEntries = readLockEntries(lockfile);
+
+    assert.equal(targetContent, '# Base');
+    assert.equal(lockEntries[0]?.sourceHash, hashText('# Base'));
+    assert.equal(lockEntries[0]?.targetHash, hashText('# Base'));
+    assert.equal(lockEntries[0]?.status, 'installed');
+  });
+
+  it('keeps first sync read-only when dry-run is combined with opt-in', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-sync-first-dry-run-');
+    const workspaceDirectory = await createWorkspaceFixture({
+      prefix: 'veaw-sync-workspace-',
+      resources: [
+        createFixtureResource({
+          id: 'prompt:base',
+          fileName: 'base.md',
+          content: '# Base',
+        }),
+      ],
+    });
+
+    await fs.ensureDir(path.join(projectDirectory, '.veaw'));
+    await writeProjectConfig(projectDirectory, workspaceDirectory);
+
+    await runSyncInDirectory(projectDirectory, {
+      dryRun: true,
+      writeLockfile: true,
+    });
+
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'resources.lock.json')), false);
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'resources', 'prompts', 'base.md')), false);
+  });
+
   it('upgrades legacy lockfile entries after sync', async (): Promise<void> => {
     const projectDirectory = await createTemporaryDirectory('veaw-sync-legacy-lock-');
     const workspaceDirectory = await createWorkspaceFixture({
@@ -336,6 +483,7 @@ describe('runSyncCommand', (): void => {
 
     await runSyncInDirectory(projectDirectory, {
       workspace: workspaceDirectory,
+      writeLockfile: true,
     });
 
     const config = await readJsonObject(path.join(projectDirectory, '.veaw', 'config.json'));
@@ -387,7 +535,10 @@ describe('runSyncCommand', (): void => {
  * @param directory 目标目录。
  * @param options sync 选项。
  */
-async function runSyncInDirectory(directory: string, options: { readonly workspace?: string } = {}): Promise<void> {
+async function runSyncInDirectory(
+  directory: string,
+  options: { readonly workspace?: string; readonly writeLockfile?: boolean; readonly dryRun?: boolean } = {},
+): Promise<void> {
   const originalCwd = process.cwd();
   const originalExitCode = process.exitCode;
 

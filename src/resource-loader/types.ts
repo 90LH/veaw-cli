@@ -29,6 +29,81 @@ export type ResourceLockStatus = 'installed' | 'modified' | 'missing' | 'conflic
 export type ResourceLockLastAction = 'init' | 'sync' | 'migrate';
 
 /**
+ * Project profile field value.
+ */
+export type ProjectProfileValue = string | readonly string[];
+
+/**
+ * Project profile used by resource selection.
+ */
+export interface ProjectProfile {
+  /**
+   * Framework names, for example vue or react.
+   */
+  readonly framework?: ProjectProfileValue;
+  /**
+   * Main project language.
+   */
+  readonly language?: string;
+  /**
+   * Package manager name.
+   */
+  readonly packageManager?: string;
+  /**
+   * UI library names.
+   */
+  readonly uiLibrary?: ProjectProfileValue;
+  /**
+   * Project type, for example frontend or backend.
+   */
+  readonly projectType?: string;
+}
+
+/**
+ * Resource profile condition.
+ */
+export interface ResourceProfileCondition {
+  /**
+   * Required framework value.
+   */
+  readonly framework?: ProjectProfileValue;
+  /**
+   * Required language value.
+   */
+  readonly language?: ProjectProfileValue;
+  /**
+   * Required package manager value.
+   */
+  readonly packageManager?: ProjectProfileValue;
+  /**
+   * Required UI library value.
+   */
+  readonly uiLibrary?: ProjectProfileValue;
+  /**
+   * Required project type value.
+   */
+  readonly projectType?: ProjectProfileValue;
+}
+
+/**
+ * Resource conflict condition.
+ */
+export interface ResourceConflictCondition extends ResourceProfileCondition {
+  /**
+   * Conflicting resource ids.
+   */
+  readonly resources?: readonly string[];
+  /**
+   * Conflicting preset ids.
+   */
+  readonly presets?: readonly string[];
+  /**
+   * Conflicting extension ids.
+   */
+  readonly extensions?: readonly string[];
+}
+
+/**
  * Workspace discovery options.
  */
 export interface WorkspaceDiscoveryOptions {
@@ -200,6 +275,18 @@ export interface WorkspaceResource {
    * Source hash.
    */
   readonly hash: string;
+  /**
+   * Profile condition required for this resource to apply.
+   */
+  readonly appliesTo?: ResourceProfileCondition;
+  /**
+   * Conditions that make this resource conflict with the selection.
+   */
+  readonly conflictsWith?: ResourceConflictCondition;
+  /**
+   * Resources included when this preset or extension is selected.
+   */
+  readonly defaultResources?: readonly string[];
 }
 
 /**
@@ -262,6 +349,65 @@ export interface ResourceQuery {
    * Tag required on the resource.
    */
   readonly tag?: string;
+}
+
+/**
+ * Resource selection input.
+ */
+export interface ResourceSelectionInput {
+  /**
+   * Project profile. Undefined keeps legacy enabledByDefault behavior.
+   */
+  readonly profile?: ProjectProfile;
+  /**
+   * Explicit preset resource ids.
+   */
+  readonly presetIds?: readonly string[];
+  /**
+   * Explicit extension resource ids.
+   */
+  readonly extensionIds?: readonly string[];
+}
+
+/**
+ * Resource selection decision status.
+ */
+export type ResourceSelectionDecisionStatus = 'selected' | 'excluded' | 'conflict';
+
+/**
+ * Resource selection decision.
+ */
+export interface ResourceSelectionDecision {
+  /**
+   * Resource id.
+   */
+  readonly id: string;
+  /**
+   * Decision status.
+   */
+  readonly status: ResourceSelectionDecisionStatus;
+  /**
+   * Human-readable reason.
+   */
+  readonly reason: string;
+  /**
+   * Resource that caused this decision.
+   */
+  readonly selectedBy?: string;
+}
+
+/**
+ * Resource selection result.
+ */
+export interface ResourceSelectionResult {
+  /**
+   * Final resources ordered with dependencies first.
+   */
+  readonly resources: readonly WorkspaceResource[];
+  /**
+   * Explainable decisions for selected, excluded and conflicted resources.
+   */
+  readonly decisions: readonly ResourceSelectionDecision[];
 }
 
 /**

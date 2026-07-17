@@ -1,11 +1,12 @@
 import path from 'node:path';
 import { Command } from 'commander';
 import {
+  createProjectProfileFromProjectJson,
   discoverWorkspace,
   readResourceContents,
   readWorkspaceRegistry,
 } from '../resource-loader/index.js';
-import type { ResourceContent } from '../resource-loader/index.js';
+import type { ProjectProfile, ResourceContent } from '../resource-loader/index.js';
 import { ensureDirectory, pathExists, readTextFile, writeTextFile } from '../utils/file.js';
 import { logger } from '../utils/logger.js';
 
@@ -178,7 +179,10 @@ export async function createPlanTemplate(targetDirectory: string, requirement: s
   await ensureVeawWorkspace(veawDirectory);
 
   const planContext = await readPlanContext(veawDirectory);
-  const workspaceResources = await readPlanWorkspaceResources(targetDirectory);
+  const workspaceResources = await readPlanWorkspaceResources(
+    targetDirectory,
+    readProjectProfileFromContent(planContext.projectContent),
+  );
 
   return generatePlanTemplate({
     requirement,
@@ -299,7 +303,10 @@ interface PlanWorkspaceResources {
  * @param targetDirectory 目标项目目录。
  * @returns Workspace 资源。
  */
-async function readPlanWorkspaceResources(targetDirectory: string): Promise<PlanWorkspaceResources> {
+async function readPlanWorkspaceResources(
+  targetDirectory: string,
+  profile: ProjectProfile | undefined,
+): Promise<PlanWorkspaceResources> {
   const location = await discoverWorkspace({
     projectDirectory: targetDirectory,
     environment: process.env,
@@ -319,16 +326,33 @@ async function readPlanWorkspaceResources(targetDirectory: string): Promise<Plan
     workflows: await readResourceContents(registry, {
       types: ['workflow'],
       enabledOnly: true,
+      profile,
     }),
     templates: await readResourceContents(registry, {
       types: ['template'],
       enabledOnly: true,
+      profile,
     }),
     skills: await readResourceContents(registry, {
       types: ['skill'],
       enabledOnly: true,
+      profile,
     }),
   };
+}
+
+/**
+ * 从 project.json 内容读取资源选择 profile。
+ *
+ * @param content project.json 内容。
+ * @returns 项目 profile。
+ */
+function readProjectProfileFromContent(content: string): ProjectProfile | undefined {
+  try {
+    return createProjectProfileFromProjectJson(JSON.parse(content) as unknown);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
