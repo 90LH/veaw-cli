@@ -5,6 +5,23 @@ export { createResourceLockfile, readResourceLockfile, resolveResourceLockfilePa
 export { materializeResource, renderTemplate } from './materializer.js';
 export { readWorkspaceRegistry } from './registry.js';
 export { ResourceResolver } from './resolver.js';
+export {
+  executeWorkspaceCommand,
+  findWorkspaceCommand,
+  parseWorkspaceCommandArguments,
+  readWorkspaceCommandRegistry,
+} from './workspace-commands.js';
+export type {
+  WorkspaceCommandDefinition,
+  WorkspaceCommandExecution,
+  WorkspaceCommandExecutionResult,
+  WorkspaceCommandExecutionType,
+  WorkspaceCommandParameterDefinition,
+  WorkspaceCommandParameterSchema,
+  WorkspaceCommandParameterValue,
+  WorkspaceCommandParameterValues,
+  WorkspaceCommandRegistry,
+} from './workspace-commands.js';
 export type {
   LoadedWorkspaceRegistry,
   MaterializeResourceInput,

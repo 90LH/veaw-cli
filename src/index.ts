@@ -8,6 +8,7 @@ import { registerPlanCommand } from './commands/plan.js';
 import { registerSessionCommand } from './commands/session.js';
 import { registerSyncCommand } from './commands/sync.js';
 import { CLI_VERSION, registerVersionCommand } from './commands/version.js';
+import { registerWorkspaceCommandsCommand } from './commands/workspace-commands.js';
 
 /**
  * CLI 主程序实例。
@@ -27,6 +28,7 @@ registerContextCommand(program);
 registerPlanCommand(program);
 registerSessionCommand(program);
 registerDoctorCommand(program);
+registerWorkspaceCommandsCommand(program);
 registerVersionCommand(program);
 
 program.parseAsync(process.argv).catch((error: unknown) => {
