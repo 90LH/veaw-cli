@@ -1,7 +1,14 @@
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import fs from 'fs-extra';
 import { isRecord, readString } from './guards.js';
-import type { ResourceLockEntry, ResourceLockfile, WorkspaceResource } from './types.js';
+import type {
+  ResourceLockEntry,
+  ResourceLockLastAction,
+  ResourceLockStatus,
+  ResourceLockfile,
+  WorkspaceResource,
+} from './types.js';
 
 /**
  * VEAW 目录名。
@@ -53,6 +60,18 @@ export async function writeResourceLockfile(projectDirectory: string, lockfile: 
 }
 
 /**
+ * 计算文件 SHA-256。
+ *
+ * @param filePath 文件路径。
+ * @returns hash 字符串。
+ */
+export async function hashFile(filePath: string): Promise<string> {
+  const content = await fs.readFile(filePath);
+
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
+}
+
+/**
  * 从资源创建 lockfile。
  *
  * @param workspaceVersion Workspace 版本。
@@ -88,13 +107,20 @@ export function resolveResourceLockfilePath(projectDirectory: string): string {
  * @returns lockfile 条目。
  */
 function createLockEntry(resource: WorkspaceResource): ResourceLockEntry {
+  const now = new Date().toISOString();
+
   return {
     id: resource.id,
     type: resource.type,
     version: resource.version,
     sourcePath: resource.sourcePath,
     targetPath: resource.targetPath,
-    hash: resource.hash,
+    sourceHash: resource.hash,
+    targetHash: resource.hash,
+    installedAt: now,
+    updatedAt: now,
+    status: 'installed',
+    lastAction: 'init',
   };
 }
 
@@ -108,7 +134,9 @@ function parseResourceLockfile(record: Readonly<Record<string, unknown>>): Resou
   const schemaVersion = readString(record, 'schemaVersion');
   const workspaceVersion = readString(record, 'workspaceVersion');
   const generatedAt = readString(record, 'generatedAt');
-  const resources = Array.isArray(record.resources) ? record.resources.map(parseLockEntry) : undefined;
+  const resources = Array.isArray(record.resources)
+    ? record.resources.map((resource) => parseLockEntry(resource, generatedAt))
+    : undefined;
 
   if (
     schemaVersion !== LOCKFILE_SCHEMA_VERSION ||
@@ -134,7 +162,7 @@ function parseResourceLockfile(record: Readonly<Record<string, unknown>>): Resou
  * @param value 原始值。
  * @returns lockfile 条目。
  */
-function parseLockEntry(value: unknown): ResourceLockEntry | undefined {
+function parseLockEntry(value: unknown, generatedAt: string | undefined): ResourceLockEntry | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -144,7 +172,13 @@ function parseLockEntry(value: unknown): ResourceLockEntry | undefined {
   const version = readString(value, 'version');
   const sourcePath = readString(value, 'sourcePath');
   const targetPath = readString(value, 'targetPath');
-  const hash = readString(value, 'hash');
+  const legacyHash = readString(value, 'hash');
+  const sourceHash = readString(value, 'sourceHash') ?? legacyHash;
+  const targetHash = readString(value, 'targetHash') ?? legacyHash;
+  const installedAt = readString(value, 'installedAt') ?? generatedAt;
+  const updatedAt = readString(value, 'updatedAt') ?? generatedAt;
+  const status = readLockStatus(value.status) ?? 'installed';
+  const lastAction = readLockLastAction(value.lastAction) ?? (legacyHash === undefined ? 'init' : 'migrate');
 
   if (
     id === undefined ||
@@ -152,7 +186,9 @@ function parseLockEntry(value: unknown): ResourceLockEntry | undefined {
     version === undefined ||
     sourcePath === undefined ||
     targetPath === undefined ||
-    hash === undefined
+    sourceHash === undefined ||
+    installedAt === undefined ||
+    updatedAt === undefined
   ) {
     return undefined;
   }
@@ -163,6 +199,45 @@ function parseLockEntry(value: unknown): ResourceLockEntry | undefined {
     version,
     sourcePath,
     targetPath,
-    hash,
+    sourceHash,
+    targetHash,
+    installedAt,
+    updatedAt,
+    status,
+    lastAction,
   };
+}
+
+/**
+ * 读取 lock 状态。
+ *
+ * @param value 原始值。
+ * @returns lock 状态。
+ */
+function readLockStatus(value: unknown): ResourceLockStatus | undefined {
+  if (
+    value === 'installed' ||
+    value === 'modified' ||
+    value === 'missing' ||
+    value === 'conflict' ||
+    value === 'skipped'
+  ) {
+    return value;
+  }
+
+  return undefined;
+}
+
+/**
+ * 读取 lock 最近动作。
+ *
+ * @param value 原始值。
+ * @returns lock 最近动作。
+ */
+function readLockLastAction(value: unknown): ResourceLockLastAction | undefined {
+  if (value === 'init' || value === 'sync' || value === 'migrate') {
+    return value;
+  }
+
+  return undefined;
 }

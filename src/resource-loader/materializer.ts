@@ -38,7 +38,7 @@ export async function materializeResource(input: MaterializeResourceInput): Prom
   const content = input.resource.copyPolicy === 'render' ? renderTemplate(sourceContent, input.variables ?? {}) : sourceContent;
 
   const action = input.resource.copyPolicy === 'render' ? 'rendered' : 'copied';
-  const written = await writeWithOverwritePolicy(targetPath, content, input.resource.overwritePolicy);
+  const written = await writeWithOverwritePolicy(targetPath, content, input.overwritePolicy ?? input.resource.overwritePolicy);
 
   return createResult(input.resource.id, written ? action : 'skipped', sourcePath, targetPath);
 }

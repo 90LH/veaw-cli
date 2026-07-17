@@ -19,6 +19,16 @@ export type ResourceOverwritePolicy = 'never' | 'if-missing' | 'managed-block' |
 export type MaterializeAction = 'copied' | 'rendered' | 'referenced' | 'skipped';
 
 /**
+ * Resource lock status.
+ */
+export type ResourceLockStatus = 'installed' | 'modified' | 'missing' | 'conflict' | 'skipped';
+
+/**
+ * Resource lock last action.
+ */
+export type ResourceLockLastAction = 'init' | 'sync' | 'migrate';
+
+/**
  * Workspace discovery options.
  */
 export interface WorkspaceDiscoveryOptions {
@@ -271,6 +281,10 @@ export interface MaterializeResourceInput {
    */
   readonly resource: WorkspaceResource;
   /**
+   * Override overwrite policy for a trusted materialization.
+   */
+  readonly overwritePolicy?: ResourceOverwritePolicy;
+  /**
    * Render variables for render copy policy.
    */
   readonly variables?: Readonly<Record<string, string>>;
@@ -323,9 +337,33 @@ export interface ResourceLockEntry {
    */
   readonly targetPath: string;
   /**
-   * Source hash.
+   * Legacy source hash field.
    */
-  readonly hash: string;
+  readonly hash?: string;
+  /**
+   * Workspace source hash.
+   */
+  readonly sourceHash: string;
+  /**
+   * Project target file hash.
+   */
+  readonly targetHash?: string;
+  /**
+   * First install timestamp.
+   */
+  readonly installedAt: string;
+  /**
+   * Last update timestamp.
+   */
+  readonly updatedAt: string;
+  /**
+   * Current resource status.
+   */
+  readonly status: ResourceLockStatus;
+  /**
+   * Last action that changed this entry.
+   */
+  readonly lastAction: ResourceLockLastAction;
 }
 
 /**

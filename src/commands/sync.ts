@@ -1,5 +1,4 @@
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { Command } from 'commander';
 import { execa } from 'execa';
 import fs from 'fs-extra';
@@ -7,6 +6,7 @@ import {
   ResourceResolver,
   createResourceLockfile,
   discoverWorkspace,
+  hashFile,
   materializeResource,
   readResourceLockfile,
   readWorkspaceRegistry,
@@ -15,7 +15,9 @@ import {
 import type {
   LoadedWorkspaceRegistry,
   ResourceLockEntry,
+  ResourceLockStatus,
   ResourceLockfile,
+  ResourceOverwritePolicy,
   WorkspaceResource,
 } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
@@ -274,30 +276,29 @@ interface WorkspaceConfigInput {
 }
 
 /**
- * 资源同步状态。
- */
-type ResourceSyncStatus = 'new' | 'changed' | 'missing' | 'conflict';
-
-/**
  * 资源同步摘要。
  */
 interface ResourceSyncSummary {
   /**
-   * 新增资源数量。
+   * 已安装资源数量。
    */
-  readonly newCount: number;
+  readonly installedCount: number;
   /**
-   * 变更资源数量。
+   * 用户修改资源数量。
    */
-  readonly changedCount: number;
+  readonly modifiedCount: number;
   /**
-   * Registry 中缺失的旧资源数量。
+   * 缺失资源数量。
    */
   readonly missingCount: number;
   /**
    * 冲突资源数量。
    */
   readonly conflictCount: number;
+  /**
+   * 跳过资源数量。
+   */
+  readonly skippedCount: number;
 }
 
 /**
@@ -428,7 +429,7 @@ async function syncWorkspaceResources(context: SyncContext, options: SyncCommand
   });
 
   logger.success(
-    `资源同步完成：新增 ${summary.newCount}，变更 ${summary.changedCount}，缺失 ${summary.missingCount}，冲突 ${summary.conflictCount}`,
+    `资源同步完成：已安装 ${summary.installedCount}，已修改 ${summary.modifiedCount}，缺失 ${summary.missingCount}，冲突 ${summary.conflictCount}，跳过 ${summary.skippedCount}`,
   );
 }
 
@@ -465,7 +466,7 @@ async function materializeChangedResources(
   const currentEntries = new Map(currentLockfile?.resources.map((entry) => [entry.id, entry]) ?? []);
   const desiredIds = new Set(desiredResources.map((resource) => resource.id));
   const nextEntries: ResourceLockEntry[] = [];
-  const statuses: ResourceSyncStatus[] = [];
+  const statuses: ResourceLockStatus[] = [];
 
   for (const currentEntry of currentEntries.values()) {
     if (!desiredIds.has(currentEntry.id)) {
@@ -475,26 +476,12 @@ async function materializeChangedResources(
 
   for (const resource of desiredResources) {
     const currentEntry = currentEntries.get(resource.id);
-    const status = getResourceStatus(resource, currentEntry);
-
-    if (status !== undefined) {
-      statuses.push(status);
-    }
-
-    if (await hasResourceConflict(context.targetDirectory, resource, currentEntry, status)) {
-      statuses.push('conflict');
-
-      if (currentEntry !== undefined) {
-        nextEntries.push(currentEntry);
-      }
-
-      continue;
-    }
-
-    const nextEntry = await materializeResourceIfNeeded(context, registry, resource, currentEntry, status);
+    const inspection = await inspectResource(context.targetDirectory, resource, currentEntry);
+    const nextEntry = await materializeResourceIfNeeded(context, registry, resource, currentEntry, inspection);
 
     if (nextEntry !== undefined) {
       nextEntries.push(nextEntry);
+      statuses.push(nextEntry.status);
     }
   }
 
@@ -508,76 +495,114 @@ async function materializeChangedResources(
 }
 
 /**
- * 判断资源状态。
- *
- * @param resource Workspace 资源。
- * @param currentEntry 当前 lockfile 条目。
- * @returns 资源状态。
+ * 资源同步前检查结果。
  */
-function getResourceStatus(
-  resource: WorkspaceResource,
-  currentEntry: ResourceLockEntry | undefined,
-): Exclude<ResourceSyncStatus, 'missing' | 'conflict'> | undefined {
-  if (currentEntry === undefined) {
-    return 'new';
-  }
-
-  return isLockEntryChanged(resource, currentEntry) ? 'changed' : undefined;
+interface ResourceInspection {
+  /**
+   * 目标文件路径。
+   */
+  readonly targetPath: string;
+  /**
+   * 当前目标文件 hash。
+   */
+  readonly currentTargetHash?: string;
+  /**
+   * 目标文件是否存在。
+   */
+  readonly targetExists: boolean;
+  /**
+   * Workspace 资源是否变化。
+   */
+  readonly sourceChanged: boolean;
+  /**
+   * 项目目标是否被用户修改。
+   */
+  readonly targetModified: boolean;
 }
 
 /**
- * 判断 lockfile 条目是否和 Registry 资源不一致。
+ * 检查资源当前状态。
+ *
+ * @param projectDirectory 项目根目录。
+ * @param resource Workspace 资源。
+ * @param currentEntry 当前 lockfile 条目。
+ * @returns 检查结果。
+ */
+async function inspectResource(
+  projectDirectory: string,
+  resource: WorkspaceResource,
+  currentEntry: ResourceLockEntry | undefined,
+): Promise<ResourceInspection> {
+  const targetPath = path.join(projectDirectory, resource.targetPath);
+  const targetExists = await fs.pathExists(targetPath);
+  const currentTargetHash = targetExists ? await hashFile(targetPath) : undefined;
+  const sourceChanged = currentEntry === undefined ? true : isWorkspaceResourceChanged(resource, currentEntry);
+  const targetModified = isTargetModified(currentEntry, currentTargetHash);
+
+  return {
+    targetPath,
+    currentTargetHash,
+    targetExists,
+    sourceChanged,
+    targetModified,
+  };
+}
+
+/**
+ * 判断 Workspace 资源是否相对 lockfile 变化。
  *
  * @param resource Workspace 资源。
  * @param currentEntry 当前 lockfile 条目。
  * @returns 是否变化。
  */
-function isLockEntryChanged(resource: WorkspaceResource, currentEntry: ResourceLockEntry): boolean {
+function isWorkspaceResourceChanged(resource: WorkspaceResource, currentEntry: ResourceLockEntry): boolean {
   return (
     currentEntry.type !== resource.type ||
     currentEntry.version !== resource.version ||
     currentEntry.sourcePath !== resource.sourcePath ||
     currentEntry.targetPath !== resource.targetPath ||
-    currentEntry.hash !== resource.hash
+    currentEntry.sourceHash !== resource.hash
   );
 }
 
 /**
- * 判断资源是否存在用户内容冲突。
+ * 判断目标文件是否被用户修改。
  *
- * @param projectDirectory 项目根目录。
- * @param resource Workspace 资源。
  * @param currentEntry 当前 lockfile 条目。
- * @param status 资源状态。
- * @returns 是否冲突。
+ * @param currentTargetHash 当前目标 hash。
+ * @returns 是否修改。
  */
-async function hasResourceConflict(
-  projectDirectory: string,
-  resource: WorkspaceResource,
+function isTargetModified(
   currentEntry: ResourceLockEntry | undefined,
-  status: Exclude<ResourceSyncStatus, 'missing' | 'conflict'> | undefined,
-): Promise<boolean> {
-  if (status === undefined || resource.copyPolicy === 'reference' || resource.copyPolicy === 'none') {
+  currentTargetHash: string | undefined,
+): boolean {
+  if (currentEntry === undefined || currentTargetHash === undefined) {
     return false;
   }
 
-  if (resource.overwritePolicy === 'always' || resource.overwritePolicy === 'managed-block') {
-    return false;
-  }
-
-  const targetPath = path.join(projectDirectory, resource.targetPath);
-
-  if (!(await fs.pathExists(targetPath))) {
-    return false;
-  }
-
-  if (currentEntry === undefined) {
+  if (currentEntry.status === 'modified' || currentEntry.status === 'conflict') {
     return true;
   }
 
-  const targetHash = await hashFile(targetPath);
+  return currentEntry.targetHash !== undefined && currentTargetHash !== currentEntry.targetHash;
+}
 
-  return targetHash !== currentEntry.hash;
+/**
+ * 资源同步决策。
+ */
+interface ResourceDecision {
+  /**
+   * 最终状态。
+   */
+  readonly status: ResourceLockStatus;
+  /**
+   * 是否需要物化。
+   */
+  readonly shouldMaterialize: boolean;
+  /**
+   * 物化时使用的覆盖策略。
+   */
+  readonly overwritePolicy?: ResourceOverwritePolicy;
 }
 
 /**
@@ -587,7 +612,7 @@ async function hasResourceConflict(
  * @param registry 已加载 Registry。
  * @param resource Workspace 资源。
  * @param currentEntry 当前 lockfile 条目。
- * @param status 资源状态。
+ * @param inspection 资源检查结果。
  * @returns 下一个 lockfile 条目。
  */
 async function materializeResourceIfNeeded(
@@ -595,51 +620,249 @@ async function materializeResourceIfNeeded(
   registry: LoadedWorkspaceRegistry,
   resource: WorkspaceResource,
   currentEntry: ResourceLockEntry | undefined,
-  status: Exclude<ResourceSyncStatus, 'missing' | 'conflict'> | undefined,
+  inspection: ResourceInspection,
 ): Promise<ResourceLockEntry | undefined> {
-  if (status === undefined) {
-    return createResourceLockEntry(resource);
+  const decision = decideResourceSync(resource, currentEntry, inspection);
+
+  if (!decision.shouldMaterialize) {
+    logProtectedResource(resource, decision.status, inspection);
+    return createResourceLockEntry(resource, currentEntry, inspection.currentTargetHash, decision.status);
   }
 
   if (resource.copyPolicy === 'reference' || resource.copyPolicy === 'none') {
-    return createResourceLockEntry(resource);
+    return createResourceLockEntry(resource, currentEntry, inspection.currentTargetHash, 'skipped');
   }
 
   const result = await materializeResource({
     workspaceDirectory: registry.location.rootDirectory,
     projectDirectory: context.targetDirectory,
     resource,
+    overwritePolicy: decision.overwritePolicy,
   });
 
   if (result.action === 'copied' || result.action === 'rendered') {
     logger.success(`${result.action === 'copied' ? '创建' : '生成'} ${toDisplayPath(result.targetPath)}`);
-    return createResourceLockEntry(resource);
+    const targetHash = (await fs.pathExists(result.targetPath)) ? await hashFile(result.targetPath) : undefined;
+
+    return createResourceLockEntry(resource, currentEntry, targetHash, targetHash === undefined ? 'missing' : 'installed');
   }
 
-  if (currentEntry !== undefined) {
-    logger.warn(`保留 ${resource.id}：Registry 已变化，但 overwritePolicy=${resource.overwritePolicy} 未允许覆盖`);
-    return currentEntry;
+  logger.warn(`跳过 ${resource.id}：overwritePolicy=${resource.overwritePolicy} 未允许写入`);
+  return createResourceLockEntry(resource, currentEntry, inspection.currentTargetHash, 'skipped');
+}
+
+/**
+ * 决定资源同步动作。
+ *
+ * @param resource Workspace 资源。
+ * @param currentEntry 当前 lockfile 条目。
+ * @param inspection 资源检查结果。
+ * @returns 同步决策。
+ */
+function decideResourceSync(
+  resource: WorkspaceResource,
+  currentEntry: ResourceLockEntry | undefined,
+  inspection: ResourceInspection,
+): ResourceDecision {
+  if (resource.copyPolicy === 'reference' || resource.copyPolicy === 'none') {
+    return {
+      status: 'skipped',
+      shouldMaterialize: false,
+    };
   }
 
-  logger.warn(`跳过 ${resource.id}：目标文件已存在且 overwritePolicy=${resource.overwritePolicy}`);
-  return undefined;
+  if (currentEntry === undefined && inspection.targetExists) {
+    if (resource.overwritePolicy === 'always' || resource.overwritePolicy === 'managed-block') {
+      return {
+        status: 'installed',
+        shouldMaterialize: true,
+        overwritePolicy: resource.overwritePolicy,
+      };
+    }
+
+    return {
+      status: 'skipped',
+      shouldMaterialize: false,
+    };
+  }
+
+  if (currentEntry?.status === 'skipped' && inspection.targetExists) {
+    if (
+      inspection.sourceChanged &&
+      (resource.overwritePolicy === 'always' || resource.overwritePolicy === 'managed-block')
+    ) {
+      return {
+        status: 'installed',
+        shouldMaterialize: true,
+        overwritePolicy: resource.overwritePolicy,
+      };
+    }
+
+    return {
+      status: 'skipped',
+      shouldMaterialize: false,
+    };
+  }
+
+  if (!inspection.targetExists && currentEntry !== undefined) {
+    return {
+      status: 'missing',
+      shouldMaterialize: false,
+    };
+  }
+
+  if (inspection.targetModified && inspection.sourceChanged) {
+    return createModifiedTargetDecision(resource, 'conflict');
+  }
+
+  if (inspection.targetModified) {
+    return createModifiedTargetDecision(resource, 'modified');
+  }
+
+  if (currentEntry === undefined || inspection.sourceChanged || !inspection.targetExists) {
+    return {
+      status: 'installed',
+      shouldMaterialize: true,
+      overwritePolicy: resolveTrustedOverwritePolicy(resource.overwritePolicy),
+    };
+  }
+
+  return {
+    status: 'installed',
+    shouldMaterialize: false,
+  };
+}
+
+/**
+ * 创建用户修改目标文件后的决策。
+ *
+ * @param resource Workspace 资源。
+ * @param protectedStatus 保护状态。
+ * @returns 同步决策。
+ */
+function createModifiedTargetDecision(
+  resource: WorkspaceResource,
+  protectedStatus: Extract<ResourceLockStatus, 'modified' | 'conflict'>,
+): ResourceDecision {
+  if (resource.overwritePolicy === 'always' || resource.overwritePolicy === 'managed-block') {
+    return {
+      status: 'installed',
+      shouldMaterialize: true,
+      overwritePolicy: resource.overwritePolicy,
+    };
+  }
+
+  return {
+    status: protectedStatus,
+    shouldMaterialize: false,
+  };
+}
+
+/**
+ * 解析可信覆盖策略。
+ *
+ * @param overwritePolicy Registry 覆盖策略。
+ * @returns 物化覆盖策略。
+ */
+function resolveTrustedOverwritePolicy(overwritePolicy: ResourceOverwritePolicy): ResourceOverwritePolicy {
+  if (overwritePolicy === 'never') {
+    return overwritePolicy;
+  }
+
+  if (overwritePolicy === 'managed-block') {
+    return overwritePolicy;
+  }
+
+  return 'always';
+}
+
+/**
+ * 输出受保护资源日志。
+ *
+ * @param resource Workspace 资源。
+ * @param status 资源状态。
+ * @param inspection 资源检查结果。
+ */
+function logProtectedResource(
+  resource: WorkspaceResource,
+  status: ResourceLockStatus,
+  inspection: ResourceInspection,
+): void {
+  if (status === 'modified') {
+    logger.warn(`保留 ${resource.id}：项目文件已被用户修改`);
+    return;
+  }
+
+  if (status === 'conflict') {
+    logger.warn(`保留 ${resource.id}：Workspace 与项目文件均已变化`);
+    return;
+  }
+
+  if (status === 'missing' && !inspection.targetExists) {
+    logger.warn(`标记 ${resource.id}：项目文件已删除`);
+  }
 }
 
 /**
  * 创建资源 lockfile 条目。
  *
  * @param resource Workspace 资源。
+ * @param currentEntry 当前 lockfile 条目。
+ * @param targetHash 项目目标文件 hash。
+ * @param status 资源状态。
  * @returns lockfile 条目。
  */
-function createResourceLockEntry(resource: WorkspaceResource): ResourceLockEntry {
-  return {
+function createResourceLockEntry(
+  resource: WorkspaceResource,
+  currentEntry: ResourceLockEntry | undefined,
+  targetHash: string | undefined,
+  status: ResourceLockStatus,
+): ResourceLockEntry {
+  const now = new Date().toISOString();
+  const nextEntry: ResourceLockEntry = {
     id: resource.id,
     type: resource.type,
     version: resource.version,
     sourcePath: resource.sourcePath,
     targetPath: resource.targetPath,
-    hash: resource.hash,
+    sourceHash: resource.hash,
+    targetHash,
+    installedAt: currentEntry?.installedAt ?? now,
+    updatedAt: now,
+    status,
+    lastAction: 'sync',
   };
+
+  if (currentEntry === undefined || !isSameLockEntryState(nextEntry, currentEntry)) {
+    return nextEntry;
+  }
+
+  return {
+    ...nextEntry,
+    installedAt: currentEntry.installedAt,
+    updatedAt: currentEntry.updatedAt,
+  };
+}
+
+/**
+ * 判断两个 lock 条目的非时间状态是否一致。
+ *
+ * @param left 左侧条目。
+ * @param right 右侧条目。
+ * @returns 是否一致。
+ */
+function isSameLockEntryState(left: ResourceLockEntry, right: ResourceLockEntry): boolean {
+  return (
+    left.id === right.id &&
+    left.type === right.type &&
+    left.version === right.version &&
+    left.sourcePath === right.sourcePath &&
+    left.targetPath === right.targetPath &&
+    left.sourceHash === right.sourceHash &&
+    left.targetHash === right.targetHash &&
+    left.status === right.status &&
+    left.lastAction === right.lastAction
+  );
 }
 
 /**
@@ -719,12 +942,13 @@ async function writeResourceLockfileIfChanged(
  * @param statuses 资源状态列表。
  * @returns 资源同步摘要。
  */
-function countResourceStatuses(statuses: readonly ResourceSyncStatus[]): ResourceSyncSummary {
+function countResourceStatuses(statuses: readonly ResourceLockStatus[]): ResourceSyncSummary {
   return {
-    newCount: countStatus(statuses, 'new'),
-    changedCount: countStatus(statuses, 'changed'),
+    installedCount: countStatus(statuses, 'installed'),
+    modifiedCount: countStatus(statuses, 'modified'),
     missingCount: countStatus(statuses, 'missing'),
     conflictCount: countStatus(statuses, 'conflict'),
+    skippedCount: countStatus(statuses, 'skipped'),
   };
 }
 
@@ -735,7 +959,7 @@ function countResourceStatuses(statuses: readonly ResourceSyncStatus[]): Resourc
  * @param status 目标状态。
  * @returns 状态数量。
  */
-function countStatus(statuses: readonly ResourceSyncStatus[], status: ResourceSyncStatus): number {
+function countStatus(statuses: readonly ResourceLockStatus[], status: ResourceLockStatus): number {
   return statuses.filter((item) => item === status).length;
 }
 
@@ -1207,18 +1431,6 @@ async function writeJsonIfChanged(filePath: string, data: JsonObject): Promise<v
     spaces: 2,
   });
   logger.success(`更新 ${toDisplayPath(filePath)}`);
-}
-
-/**
- * 计算文件 SHA-256。
- *
- * @param filePath 文件路径。
- * @returns hash 字符串。
- */
-async function hashFile(filePath: string): Promise<string> {
-  const content = await fs.readFile(filePath);
-
-  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 
 /**

@@ -132,6 +132,36 @@ describe('resource lockfile', (): void => {
     assert.equal(nextLockfile?.workspaceVersion, '1.0.0');
     assert.equal(nextLockfile?.resources.length, 1);
     assert.equal(nextLockfile?.resources[0]?.id, 'prompt:list-page');
+    assert.equal(nextLockfile?.resources[0]?.sourceHash, 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.equal(nextLockfile?.resources[0]?.targetHash, 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.equal(nextLockfile?.resources[0]?.status, 'installed');
+    assert.equal(nextLockfile?.resources[0]?.lastAction, 'init');
+  });
+
+  it('reads legacy lockfile entries with hash only', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-project-');
+
+    await writeJsonFile(path.join(projectDirectory, '.veaw', 'resources.lock.json'), {
+      schemaVersion: '1.0.0',
+      workspaceVersion: '1.0.0',
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      resources: [
+        {
+          id: 'prompt:list-page',
+          type: 'prompt',
+          version: '1.0.0',
+          sourcePath: 'prompt:list-page.md',
+          targetPath: '.veaw/resources/prompt:list-page.md',
+          hash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+      ],
+    });
+
+    const lockfile = await readResourceLockfile(projectDirectory);
+
+    assert.equal(lockfile?.resources[0]?.sourceHash, 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.equal(lockfile?.resources[0]?.targetHash, 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.equal(lockfile?.resources[0]?.lastAction, 'migrate');
   });
 });
 

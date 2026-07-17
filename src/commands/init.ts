@@ -7,12 +7,20 @@ import {
   ResourceResolver,
   createResourceLockfile,
   discoverWorkspace,
+  hashFile,
   materializeResource,
   readResourceLockfile,
   readWorkspaceRegistry,
   writeResourceLockfile,
 } from '../resource-loader/index.js';
-import type { LoadedWorkspaceRegistry, ResourceLockfile, WorkspaceResource } from '../resource-loader/index.js';
+import type {
+  LoadedWorkspaceRegistry,
+  MaterializeAction,
+  ResourceLockEntry,
+  ResourceLockStatus,
+  ResourceLockfile,
+  WorkspaceResource,
+} from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -345,7 +353,7 @@ export async function runInitCommand(options: InitCommandOptions = {}): Promise<
     if (workspaceLocation.kind === 'workspace') {
       const registry = await readWorkspaceRegistry(workspaceLocation);
 
-      await installWorkspaceResources(context, registry);
+      const materializeActions = await installWorkspaceResources(context, registry);
       await writeWorkspaceConfig(context, {
         resourceMode: 'workspace',
         workspacePath: workspaceLocation.rootDirectory,
@@ -355,7 +363,12 @@ export async function runInitCommand(options: InitCommandOptions = {}): Promise<
       await writeOrUpdateProjectJson(context);
       await writeTemplateFromRegistryIfMissing(context, registry, 'context', 'context.md');
       await writeTemplateFromRegistryIfMissing(context, registry, 'session', 'session-log.md');
-      await writeResourcesLockfileIfChanged(context, registry.registry.workspaceVersion, resolveEnabledResources(registry));
+      await writeResourcesLockfileIfChanged(
+        context,
+        registry.registry.workspaceVersion,
+        resolveEnabledResources(registry),
+        materializeActions,
+      );
     } else {
       await copyAssetsToWorkspace(context);
       await writeWorkspaceConfig(context, {
@@ -365,7 +378,7 @@ export async function runInitCommand(options: InitCommandOptions = {}): Promise<
       await writeOrUpdateProjectJson(context);
       await writeTemplateIfMissing(context, 'context.md', 'context.md');
       await writeTemplateIfMissing(context, 'session-log.md', 'session-log.md');
-      await writeResourcesLockfileIfChanged(context, PROJECT_JSON_VERSION, []);
+      await writeResourcesLockfileIfChanged(context, PROJECT_JSON_VERSION, [], new Map<string, MaterializeAction>());
     }
 
     logger.success('初始化完成');
@@ -498,7 +511,12 @@ async function copyFileIfMissing(sourcePath: string, targetPath: string): Promis
  * @param context 初始化上下文。
  * @param registry 已加载 Registry。
  */
-async function installWorkspaceResources(context: InitContext, registry: LoadedWorkspaceRegistry): Promise<void> {
+async function installWorkspaceResources(
+  context: InitContext,
+  registry: LoadedWorkspaceRegistry,
+): Promise<ReadonlyMap<string, MaterializeAction>> {
+  const actions = new Map<string, MaterializeAction>();
+
   for (const resource of resolveEnabledResources(registry)) {
     const result = await materializeResource({
       workspaceDirectory: registry.location.rootDirectory,
@@ -506,10 +524,14 @@ async function installWorkspaceResources(context: InitContext, registry: LoadedW
       resource,
     });
 
+    actions.set(resource.id, result.action);
+
     if (result.action === 'copied' || result.action === 'rendered') {
       logger.success(`${result.action === 'copied' ? '创建' : '生成'} ${toDisplayPath(result.targetPath)}`);
     }
   }
+
+  return actions;
 }
 
 /**
@@ -614,9 +636,13 @@ async function writeResourcesLockfileIfChanged(
   context: InitContext,
   workspaceVersion: string,
   resources: readonly WorkspaceResource[],
+  materializeActions: ReadonlyMap<string, MaterializeAction>,
 ): Promise<void> {
   const currentLockfile = await readResourceLockfile(context.targetDirectory);
-  const nextLockfile = createResourceLockfile(workspaceVersion, resources);
+  const nextLockfile =
+    resources.length === 0
+      ? createResourceLockfile(workspaceVersion, resources)
+      : await createResourceLockfileForProject(context, workspaceVersion, resources, materializeActions, currentLockfile);
   const lockfile = shouldKeepCurrentLockfile(currentLockfile, nextLockfile) ? currentLockfile : nextLockfile;
 
   if (lockfile === undefined) {
@@ -630,6 +656,171 @@ async function writeResourcesLockfileIfChanged(
 
   await writeResourceLockfile(context.targetDirectory, lockfile);
   logger.success(`创建 ${toDisplayPath(path.join(context.veawDirectory, 'resources.lock.json'))}`);
+}
+
+/**
+ * 从项目实际目标文件创建资源 lockfile。
+ *
+ * @param context 初始化上下文。
+ * @param workspaceVersion Workspace 版本。
+ * @param resources 已安装资源。
+ * @param materializeActions 物化动作表。
+ * @param currentLockfile 当前 lockfile。
+ * @returns lockfile。
+ */
+async function createResourceLockfileForProject(
+  context: InitContext,
+  workspaceVersion: string,
+  resources: readonly WorkspaceResource[],
+  materializeActions: ReadonlyMap<string, MaterializeAction>,
+  currentLockfile: ResourceLockfile | undefined,
+): Promise<ResourceLockfile> {
+  const now = new Date().toISOString();
+  const currentEntries = new Map(currentLockfile?.resources.map((entry) => [entry.id, entry]) ?? []);
+  const entries: ResourceLockEntry[] = [];
+
+  for (const resource of resources) {
+    const currentEntry = currentEntries.get(resource.id);
+    const targetPath = path.join(context.targetDirectory, resource.targetPath);
+    const targetHash = (await fs.pathExists(targetPath)) ? await hashFile(targetPath) : undefined;
+    const materializeAction = materializeActions.get(resource.id) ?? 'skipped';
+    const status = resolveInitLockStatus(materializeAction, targetHash, currentEntry);
+    const candidate = createInitLockEntry(resource, targetHash, status, currentEntry?.installedAt ?? now, now);
+
+    entries.push(keepLockEntryTimestampsIfUnchanged(candidate, currentEntry));
+  }
+
+  return {
+    ...createResourceLockfile(workspaceVersion, []),
+    generatedAt: shouldKeepLockfileTimestamp(currentLockfile, workspaceVersion, entries)
+      ? currentLockfile.generatedAt
+      : now,
+    resources: entries,
+  };
+}
+
+/**
+ * 解析 init 后的资源状态。
+ *
+ * @param materializeAction 物化动作。
+ * @param targetHash 目标文件 hash。
+ * @param currentEntry 当前 lockfile 条目。
+ * @returns lock 状态。
+ */
+function resolveInitLockStatus(
+  materializeAction: MaterializeAction,
+  targetHash: string | undefined,
+  currentEntry: ResourceLockEntry | undefined,
+): ResourceLockStatus {
+  if (
+    materializeAction === 'skipped' &&
+    currentEntry !== undefined &&
+    currentEntry.status === 'installed' &&
+    currentEntry.targetHash === targetHash
+  ) {
+    return 'installed';
+  }
+
+  if (materializeAction === 'skipped' || materializeAction === 'referenced') {
+    return 'skipped';
+  }
+
+  return targetHash === undefined ? 'missing' : 'installed';
+}
+
+/**
+ * 创建 init lock 条目。
+ *
+ * @param resource Workspace 资源。
+ * @param targetHash 项目目标文件 hash。
+ * @param status 资源状态。
+ * @param installedAt 首次安装时间。
+ * @param updatedAt 更新时间。
+ * @returns lock 条目。
+ */
+function createInitLockEntry(
+  resource: WorkspaceResource,
+  targetHash: string | undefined,
+  status: ResourceLockStatus,
+  installedAt: string,
+  updatedAt: string,
+): ResourceLockEntry {
+  return {
+    id: resource.id,
+    type: resource.type,
+    version: resource.version,
+    sourcePath: resource.sourcePath,
+    targetPath: resource.targetPath,
+    sourceHash: resource.hash,
+    targetHash,
+    installedAt,
+    updatedAt,
+    status,
+    lastAction: 'init',
+  };
+}
+
+/**
+ * 条目未变化时复用已有时间戳。
+ *
+ * @param nextEntry 下一个条目。
+ * @param currentEntry 当前条目。
+ * @returns 稳定时间戳后的条目。
+ */
+function keepLockEntryTimestampsIfUnchanged(
+  nextEntry: ResourceLockEntry,
+  currentEntry: ResourceLockEntry | undefined,
+): ResourceLockEntry {
+  if (currentEntry === undefined || !isSameLockEntryState(nextEntry, currentEntry)) {
+    return nextEntry;
+  }
+
+  return {
+    ...nextEntry,
+    installedAt: currentEntry.installedAt,
+    updatedAt: currentEntry.updatedAt,
+  };
+}
+
+/**
+ * 判断两个 lock 条目的非时间状态是否一致。
+ *
+ * @param left 左侧条目。
+ * @param right 右侧条目。
+ * @returns 是否一致。
+ */
+function isSameLockEntryState(left: ResourceLockEntry, right: ResourceLockEntry): boolean {
+  return (
+    left.id === right.id &&
+    left.type === right.type &&
+    left.version === right.version &&
+    left.sourcePath === right.sourcePath &&
+    left.targetPath === right.targetPath &&
+    left.sourceHash === right.sourceHash &&
+    left.targetHash === right.targetHash &&
+    left.status === right.status &&
+    left.lastAction === right.lastAction
+  );
+}
+
+/**
+ * 判断是否保留 lockfile 生成时间。
+ *
+ * @param currentLockfile 当前 lockfile。
+ * @param workspaceVersion Workspace 版本。
+ * @param entries 下一个条目。
+ * @returns 是否保留。
+ */
+function shouldKeepLockfileTimestamp(
+  currentLockfile: ResourceLockfile | undefined,
+  workspaceVersion: string,
+  entries: readonly ResourceLockEntry[],
+): currentLockfile is ResourceLockfile {
+  return (
+    currentLockfile !== undefined &&
+    currentLockfile.workspaceVersion === workspaceVersion &&
+    JSON.stringify(currentLockfile.resources) === JSON.stringify(entries)
+  );
 }
 
 /**

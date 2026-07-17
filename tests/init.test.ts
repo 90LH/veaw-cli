@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -42,6 +43,10 @@ describe('runInitCommand', (): void => {
     assert.match(commandContent, /Demo Command/);
     assert.equal(Array.isArray(lockfile.resources), true);
     assert.equal((lockfile.resources as readonly unknown[]).length, 3);
+    assert.equal(readFirstLockEntry(lockfile)?.sourceHash, 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.equal(readFirstLockEntry(lockfile)?.targetHash, hashText('# Workspace Context'));
+    assert.equal(readFirstLockEntry(lockfile)?.status, 'installed');
+    assert.equal(readFirstLockEntry(lockfile)?.lastAction, 'init');
   });
 
   it('uses CLI assets fallback when Workspace is not discoverable', async (): Promise<void> => {
@@ -271,6 +276,32 @@ async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
  */
 async function readJsonObject(filePath: string): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(filePath, 'utf8')) as Record<string, unknown>;
+}
+
+/**
+ * 读取第一个 lockfile 条目。
+ *
+ * @param lockfile lockfile JSON。
+ * @returns 第一个 lockfile 条目。
+ */
+function readFirstLockEntry(lockfile: Readonly<Record<string, unknown>>): Record<string, unknown> | undefined {
+  if (!Array.isArray(lockfile.resources)) {
+    return undefined;
+  }
+
+  const [entry] = lockfile.resources;
+
+  return typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? (entry as Record<string, unknown>) : undefined;
+}
+
+/**
+ * 计算文本 SHA-256。
+ *
+ * @param content 文本内容。
+ * @returns hash 字符串。
+ */
+function hashText(content: string): string {
+  return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 
 /**
