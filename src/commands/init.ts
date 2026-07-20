@@ -23,6 +23,8 @@ import type {
   WorkspaceResource,
 } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
+import { inspectProjectInsights } from '../utils/project-inspector.js';
+import type { ProjectInsightSummary } from '../utils/project-inspector.js';
 
 /**
  * JSON 值。
@@ -210,6 +212,10 @@ interface ProjectJson {
    */
   readonly vite: ViteSummary;
   /**
+   * 项目关键结构洞察。
+   */
+  readonly projectInsights: ProjectInsightSummary;
+  /**
    * pnpm workspace 摘要。
    */
   readonly pnpmWorkspace: PnpmWorkspaceSummary;
@@ -300,7 +306,7 @@ const PROJECT_JSON_VERSION = '0.1.0';
 /**
  * 需要创建的工作区目录。
  */
-const WORKSPACE_DIRECTORIES = ['assets', 'prompts', 'templates', 'config', 'component-catalog'] as const;
+const WORKSPACE_DIRECTORIES = ['assets', 'prompts', 'templates', 'config', 'commands', 'component-catalog'] as const;
 
 /**
  * Vite 配置文件候选。
@@ -380,7 +386,12 @@ export async function runInitCommand(options: InitCommandOptions = {}): Promise<
       await writeOrUpdateProjectJson(context);
       await writeTemplateIfMissing(context, 'context.md', 'context.md');
       await writeTemplateIfMissing(context, 'session-log.md', 'session-log.md');
-      await writeResourcesLockfileIfChanged(context, PROJECT_JSON_VERSION, [], new Map<string, MaterializeAction>());
+      const bundledAssetResources = await createBundledAssetResources(context);
+      const bundledAssetActions = new Map<string, MaterializeAction>(
+        bundledAssetResources.map((resource) => [resource.id, 'copied']),
+      );
+
+      await writeResourcesLockfileIfChanged(context, PROJECT_JSON_VERSION, bundledAssetResources, bundledAssetActions);
     }
 
     logger.success('初始化完成');
@@ -566,11 +577,22 @@ async function resolveEnabledResources(
  */
 async function writeWorkspaceConfig(context: InitContext, input: WorkspaceConfigInput): Promise<void> {
   const targetPath = path.join(context.veawDirectory, 'config.json');
+  const defaultConfig = await readDefaultWorkspaceConfig(context);
   const currentConfig = await readOptionalJsonObject(targetPath);
-  const nextConfig = mergeJsonObjects(currentConfig, createWorkspaceConfigJson(input));
+  const nextConfig = mergeJsonObjects(mergeJsonObjects(defaultConfig, currentConfig), createWorkspaceConfigJson(input));
   const result = await writeJsonIfChanged(targetPath, nextConfig);
 
   logger.success(`${result.written ? '创建' : '保留'} ${result.relativePath}`);
+}
+
+/**
+ * 读取内置默认 Workspace 配置。
+ *
+ * @param context 初始化上下文。
+ * @returns 默认配置对象。
+ */
+async function readDefaultWorkspaceConfig(context: InitContext): Promise<JsonObject> {
+  return readOptionalJsonObject(path.join(context.assetsDirectory, 'config', 'default.json'));
 }
 
 /**
@@ -875,28 +897,83 @@ async function writeTemplateIfMissing(
 }
 
 /**
- * 在 JSON 文件缺失时写入。
+ * 创建内置 assets 资源摘要，用于 fallback lockfile 审计。
  *
- * @param filePath 文件路径。
- * @param data JSON 数据。
- * @returns 文件写入结果。
+ * @param context 初始化上下文。
+ * @returns 内置资源列表。
  */
-async function writeJsonIfMissing(filePath: string, data: unknown): Promise<WriteResult> {
-  if (await fs.pathExists(filePath)) {
-    return {
-      written: false,
-      relativePath: toDisplayPath(filePath),
-    };
+async function createBundledAssetResources(context: InitContext): Promise<readonly WorkspaceResource[]> {
+  const sourcePaths = await collectFiles(context.assetsDirectory);
+  const resources: WorkspaceResource[] = [];
+
+  for (const sourcePath of sourcePaths) {
+    const relativePath = normalizePath(path.relative(context.assetsDirectory, sourcePath));
+
+    resources.push({
+      id: `assets:${relativePath}`,
+      type: inferBundledAssetResourceType(relativePath),
+      version: PROJECT_JSON_VERSION,
+      sourcePath: `assets/${relativePath}`,
+      targetPath: `.veaw/assets/${relativePath}`,
+      tags: ['assets', inferBundledAssetResourceType(relativePath)],
+      dependencies: [],
+      enabledByDefault: true,
+      copyPolicy: 'copy',
+      overwritePolicy: 'if-missing',
+      hash: await hashFile(sourcePath),
+    });
   }
 
-  await fs.outputJson(filePath, data, {
-    spaces: 2,
-  });
+  return resources;
+}
 
-  return {
-    written: true,
-    relativePath: toDisplayPath(filePath),
-  };
+/**
+ * 递归收集文件。
+ *
+ * @param directoryPath 目录路径。
+ * @returns 文件路径列表。
+ */
+async function collectFiles(directoryPath: string): Promise<readonly string[]> {
+  const entries = await fs.readdir(directoryPath, {
+    withFileTypes: true,
+  });
+  const filePaths: string[] = [];
+
+  for (const entry of entries) {
+    const entryPath = path.join(directoryPath, entry.name);
+
+    if (entry.isDirectory()) {
+      filePaths.push(...(await collectFiles(entryPath)));
+      continue;
+    }
+
+    if (entry.isFile()) {
+      filePaths.push(entryPath);
+    }
+  }
+
+  return filePaths.sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * 推断内置 asset 资源类型。
+ *
+ * @param relativePath assets 相对路径。
+ * @returns 资源类型。
+ */
+function inferBundledAssetResourceType(relativePath: string): string {
+  const [firstSegment] = relativePath.split('/');
+
+  if (
+    firstSegment === 'prompts' ||
+    firstSegment === 'templates' ||
+    firstSegment === 'agents' ||
+    firstSegment === 'skills'
+  ) {
+    return firstSegment;
+  }
+
+  return 'assets';
 }
 
 /**
@@ -977,6 +1054,7 @@ async function createProjectJson(context: InitContext, currentProjectJson: JsonO
     packageJson,
     typescript,
     vite,
+    projectInsights: await inspectProjectInsights(context.targetDirectory, dependencies),
     pnpmWorkspace,
     git: await readGitSummary(context.targetDirectory),
   };
@@ -1491,4 +1569,14 @@ function sanitizeJsonValue(value: unknown): JsonValue | undefined {
  */
 function toDisplayPath(targetPath: string): string {
   return path.relative(process.cwd(), targetPath) || '.';
+}
+
+/**
+ * 标准化为 POSIX 风格路径。
+ *
+ * @param filePath 文件路径。
+ * @returns 标准化路径。
+ */
+function normalizePath(filePath: string): string {
+  return filePath.replaceAll(path.sep, '/');
 }

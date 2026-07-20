@@ -24,6 +24,8 @@ import type {
   WorkspaceResource,
 } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
+import { inspectProjectInsights } from '../utils/project-inspector.js';
+import type { ProjectInsightSummary } from '../utils/project-inspector.js';
 
 /**
  * JSON 值。
@@ -215,6 +217,10 @@ interface ProjectJson {
    */
   readonly vite: ViteSummary;
   /**
+   * 项目关键结构洞察。
+   */
+  readonly projectInsights: ProjectInsightSummary;
+  /**
    * pnpm workspace 摘要。
    */
   readonly pnpmWorkspace: PnpmWorkspaceSummary;
@@ -359,7 +365,7 @@ export function registerSyncCommand(program: Command): void {
     .command('sync')
     .description('Sync project metadata into .veaw/project.json.')
     .option('--workspace <path>', 'Use a VEAW Workspace directory.')
-    .option('--write-lockfile', 'Opt in to write .veaw/resources.lock.json during the first legacy resource sync.')
+    .option('--write-lockfile', 'Deprecated: resources.lock.json is written by default unless --dry-run is used.')
     .option('--dry-run', 'Scan resources and report without writing resource files or lockfile.')
     .action(async (options: SyncCommandOptions): Promise<void> => {
       await runSyncCommand(options);
@@ -376,7 +382,7 @@ export async function runSyncCommand(options: SyncCommandOptions = {}): Promise<
     const context = await createSyncContext(process.cwd());
     const resourceSyncResult = await syncWorkspaceResources(context, options);
 
-    if (resourceSyncResult.shouldWriteProjectJson) {
+    if (resourceSyncResult.shouldWriteProjectJson && options.dryRun !== true) {
       const currentProjectJson = await readExistingProjectJson(context.projectJsonPath);
       const nextProjectJson = await createProjectJson(context);
       const mergedProjectJson = mergeProjectJson(currentProjectJson, nextProjectJson);
@@ -449,6 +455,19 @@ async function syncWorkspaceResources(context: SyncContext, options: SyncCommand
 
   if (currentLockfile === undefined) {
     return syncFirstWorkspaceResources(context, registry, desiredResources, options);
+  }
+
+  if (options.dryRun === true) {
+    const summary = await inspectChangedResources(context, desiredResources, currentLockfile);
+
+    logger.warn('--dry-run 已启用，跳过写入资源、config.json、resources.lock.json 和 project.json。');
+    logger.success(
+      `资源同步预览：将安装 ${summary.installedCount}，已修改 ${summary.modifiedCount}，缺失 ${summary.missingCount}，冲突 ${summary.conflictCount}，跳过 ${summary.skippedCount}`,
+    );
+
+    return {
+      shouldWriteProjectJson: false,
+    };
   }
 
   const summary = await materializeChangedResources(context, registry, desiredResources, currentLockfile);
@@ -562,14 +581,14 @@ async function syncFirstWorkspaceResources(
 ): Promise<ResourceSyncResult> {
   const candidates = await scanFirstSyncCandidates(context, registry, desiredResources);
   const summary = countFirstSyncCandidates(candidates);
-  const shouldApply = options.writeLockfile === true && options.dryRun !== true;
+  const shouldApply = options.dryRun !== true;
 
   logger.warn(
     `首次资源同步扫描：可安全安装 ${summary.safeInstallCount}，需要认领 ${summary.needsAdoptionCount}，冲突 ${summary.conflictCount}，无法判断 ${summary.unknownCount}`,
   );
 
   if (!shouldApply) {
-    logger.warn('未写入 resources.lock.json；如需应用首次同步结果，请重新运行 veaw sync --write-lockfile。');
+    logger.warn('--dry-run 已启用，跳过写入资源、config.json、resources.lock.json 和 project.json。');
 
     return {
       shouldWriteProjectJson: false,
@@ -902,6 +921,41 @@ async function materializeChangedResources(
     createLockfileWithEntries(registry.registry.workspaceVersion, currentLockfile, nextEntries),
     currentLockfile,
   );
+
+  return countResourceStatuses(statuses);
+}
+
+/**
+ * 只检查新增或变更资源，不写入目标文件、config 或 lockfile。
+ *
+ * @param context 同步上下文。
+ * @param desiredResources Registry 期望资源。
+ * @param currentLockfile 当前 lockfile。
+ * @returns 资源同步摘要。
+ */
+async function inspectChangedResources(
+  context: SyncContext,
+  desiredResources: readonly WorkspaceResource[],
+  currentLockfile: ResourceLockfile,
+): Promise<ResourceSyncSummary> {
+  const currentEntries = new Map(currentLockfile.resources.map((entry) => [entry.id, entry]));
+  const desiredIds = new Set(desiredResources.map((resource) => resource.id));
+  const statuses: ResourceLockStatus[] = [];
+
+  for (const currentEntry of currentEntries.values()) {
+    if (!desiredIds.has(currentEntry.id)) {
+      statuses.push('missing');
+    }
+  }
+
+  for (const resource of desiredResources) {
+    const currentEntry = currentEntries.get(resource.id);
+    const inspection = await inspectResource(context.targetDirectory, resource, currentEntry);
+    const decision = decideResourceSync(resource, currentEntry, inspection);
+
+    logProtectedResource(resource, decision.status, inspection);
+    statuses.push(decision.status);
+  }
 
   return countResourceStatuses(statuses);
 }
@@ -1489,6 +1543,7 @@ async function createProjectJson(context: SyncContext): Promise<ProjectJson> {
     packageJson,
     typescript,
     vite,
+    projectInsights: await inspectProjectInsights(context.targetDirectory, dependencies),
     pnpmWorkspace,
     git: await readGitSummary(context.targetDirectory),
   };

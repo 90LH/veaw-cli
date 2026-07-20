@@ -9,6 +9,13 @@ import {
 } from '../resource-loader/index.js';
 import type { ProjectProfile, ResourceContent } from '../resource-loader/index.js';
 import { logger } from '../utils/logger.js';
+import { inspectProjectInsights } from '../utils/project-inspector.js';
+import type {
+  ProjectDependencyMap,
+  ProjectDirectorySummary,
+  ProjectFeatureSummary,
+  ProjectInsightSummary,
+} from '../utils/project-inspector.js';
 
 /**
  * JSON 值。
@@ -188,11 +195,12 @@ export async function runContextCommand(): Promise<void> {
     const projectJson = await readJsonObject(context.projectJsonPath, 'project.json');
     const catalogJson = await readOptionalJsonObject(context.catalogJsonPath);
     const components = readCatalogComponents(catalogJson);
+    const projectInsights = await inspectProjectInsights(context.targetDirectory, readProjectDependencies(projectJson));
     const resources = await readWorkspaceContextResources(
       context.targetDirectory,
       createProjectProfileFromProjectJson(projectJson),
     );
-    const generatedContent = generateContextMarkdown(projectJson, components, resources);
+    const generatedContent = generateContextMarkdown(projectJson, components, projectInsights, resources);
     const nextContent = await mergeContextContent(context.contextPath, generatedContent);
 
     await fs.outputFile(context.contextPath, nextContent);
@@ -286,6 +294,21 @@ function readCatalogComponents(catalogJson: JsonObject | undefined): readonly Ca
 }
 
 /**
+ * 从 project.json 摘要读取依赖表。
+ *
+ * @param projectJson project.json 内容。
+ * @returns 依赖表。
+ */
+function readProjectDependencies(projectJson: JsonObject): ProjectDependencyMap {
+  const packageJson = readObject(projectJson, 'packageJson');
+
+  return {
+    ...readStringRecord(packageJson, 'dependencies'),
+    ...readStringRecord(packageJson, 'devDependencies'),
+  };
+}
+
+/**
  * 读取组件目录项。
  *
  * @param component 组件对象。
@@ -313,6 +336,7 @@ function readCatalogComponent(component: Readonly<Record<string, unknown>>): Cat
 function generateContextMarkdown(
   projectJson: JsonObject,
   components: readonly CatalogComponent[],
+  projectInsights: ProjectInsightSummary,
   resources: WorkspaceContextResources,
 ): string {
   const stats = createComponentStats(components);
@@ -334,6 +358,30 @@ function generateContextMarkdown(
     '## 技术栈',
     '',
     createTechStack(projectJson),
+    '',
+    '## UI 库',
+    '',
+    createUiLibraryMarkdown(projectInsights),
+    '',
+    '## Router',
+    '',
+    createFeatureMarkdown(projectInsights.router),
+    '',
+    '## 状态管理',
+    '',
+    createFeatureMarkdown(projectInsights.stateManagement),
+    '',
+    '## API / Service 目录',
+    '',
+    createApiServiceDirectoriesMarkdown(projectInsights),
+    '',
+    '## Components 目录',
+    '',
+    createDirectorySummaryMarkdown(projectInsights.componentDirectories),
+    '',
+    '## Layout 目录',
+    '',
+    createDirectorySummaryMarkdown(projectInsights.layoutDirectories),
     '',
     '## 目录结构',
     '',
@@ -514,6 +562,67 @@ function createTechStack(projectJson: JsonObject): string {
     `- Vite 配置：${readString(vite, 'configPath') ?? '未检测到'}`,
     `- Git 分支：${readString(git, 'branch') ?? 'Unknown'}`,
   ].join('\n');
+}
+
+/**
+ * 创建 UI 库 Markdown。
+ *
+ * @param projectInsights 项目结构洞察。
+ * @returns Markdown 内容。
+ */
+function createUiLibraryMarkdown(projectInsights: ProjectInsightSummary): string {
+  return `- UI 库：${formatList(projectInsights.uiLibraries, '未检测到')}`;
+}
+
+/**
+ * 创建能力摘要 Markdown。
+ *
+ * @param feature 能力摘要。
+ * @returns Markdown 内容。
+ */
+function createFeatureMarkdown(feature: ProjectFeatureSummary): string {
+  return [
+    `- 是否检测到：${formatBooleanText(feature.detected)}`,
+    `- 依赖包：${formatList(feature.packages, '未检测到')}`,
+    `- 目录：${formatList(feature.directories, '未检测到')}`,
+  ].join('\n');
+}
+
+/**
+ * 创建 API 与 service 目录 Markdown。
+ *
+ * @param projectInsights 项目结构洞察。
+ * @returns Markdown 内容。
+ */
+function createApiServiceDirectoriesMarkdown(projectInsights: ProjectInsightSummary): string {
+  return [
+    `- API 目录：${formatList(projectInsights.apiDirectories.paths, '未检测到')}`,
+    `- Service 目录：${formatList(projectInsights.serviceDirectories.paths, '未检测到')}`,
+  ].join('\n');
+}
+
+/**
+ * 创建目录摘要 Markdown。
+ *
+ * @param summary 目录摘要。
+ * @returns Markdown 内容。
+ */
+function createDirectorySummaryMarkdown(summary: ProjectDirectorySummary): string {
+  return [
+    `- 是否检测到：${formatBooleanText(summary.detected)}`,
+    `- 目录：${formatList(summary.paths, '未检测到')}`,
+  ].join('\n');
+}
+
+/**
+ * 格式化列表。
+ *
+ * @param values 列表值。
+ * @param fallback 空列表展示文本。
+ * @returns 展示文本。
+ */
+function formatList(values: readonly string[], fallback: string): string {
+  return values.length > 0 ? values.join(', ') : fallback;
 }
 
 /**
@@ -748,6 +857,34 @@ function readStringArray(record: Readonly<Record<string, unknown>>, key: string)
   }
 
   return value.filter((item): item is string => typeof item === 'string');
+}
+
+/**
+ * 读取字符串记录字段。
+ *
+ * @param record 对象记录。
+ * @param key 字段名。
+ * @returns 字符串记录。
+ */
+function readStringRecord(
+  record: Readonly<Record<string, unknown>> | undefined,
+  key: string,
+): Readonly<Record<string, string>> {
+  const value = record?.[key];
+
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const result: Record<string, string> = {};
+
+  for (const [entryKey, entryValue] of Object.entries(value)) {
+    if (typeof entryValue === 'string') {
+      result[entryKey] = entryValue;
+    }
+  }
+
+  return result;
 }
 
 /**

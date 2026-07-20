@@ -36,6 +36,7 @@ describe('runInitCommand', (): void => {
       'utf8',
     );
 
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'commands')), true);
     assert.equal(config.resourceMode, 'workspace');
     assert.equal(config.workspacePath, workspaceDirectory);
     assert.equal(projectJson.name, path.basename(projectDirectory));
@@ -55,13 +56,20 @@ describe('runInitCommand', (): void => {
     await runInitInDirectory(projectDirectory);
 
     const assetEntries = await readdir(path.join(projectDirectory, '.veaw', 'assets'));
+    const commandsExists = await fs.pathExists(path.join(projectDirectory, '.veaw', 'commands'));
     const config = await readJsonObject(path.join(projectDirectory, '.veaw', 'config.json'));
     const lockfile = await readJsonObject(path.join(projectDirectory, '.veaw', 'resources.lock.json'));
+    const lockEntries = readLockEntries(lockfile);
 
     assert.equal(config.resourceMode, 'fallback');
+    assert.deepEqual(config.features, []);
+    assert.equal(commandsExists, true);
     assert.ok(assetEntries.includes('context.md'));
     assert.ok(assetEntries.includes('session-log.md'));
-    assert.equal((lockfile.resources as readonly unknown[]).length, 0);
+    assert.ok(lockEntries.some((entry) => entry.id === 'assets:prompts/README.md'));
+    assert.ok(lockEntries.some((entry) => entry.id === 'assets:templates/README.md'));
+    assert.ok(lockEntries.some((entry) => entry.id === 'assets:agents/README.md'));
+    assert.ok(lockEntries.some((entry) => entry.id === 'assets:skills/README.md'));
   });
 
   it('preserves existing project.json and config.json custom fields on legacy .veaw projects', async (): Promise<void> => {
@@ -292,6 +300,20 @@ function readFirstLockEntry(lockfile: Readonly<Record<string, unknown>>): Record
   const [entry] = lockfile.resources;
 
   return typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? (entry as Record<string, unknown>) : undefined;
+}
+
+/**
+ * 读取 lockfile 条目。
+ *
+ * @param lockfile lockfile JSON。
+ * @returns lockfile 条目。
+ */
+function readLockEntries(lockfile: Readonly<Record<string, unknown>>): readonly Record<string, unknown>[] {
+  return Array.isArray(lockfile.resources)
+    ? lockfile.resources.filter(
+        (entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null && !Array.isArray(entry),
+      )
+    : [];
 }
 
 /**

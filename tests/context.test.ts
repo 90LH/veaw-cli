@@ -28,6 +28,21 @@ describe('runContextCommand', (): void => {
     const contextContent = await readFile(path.join(projectDirectory, '.veaw', 'context.md'), 'utf8');
 
     assert.match(contextContent, /# VEAW Project Context/);
+    assert.match(contextContent, /## UI 库/);
+    assert.match(contextContent, /element-plus/);
+    assert.match(contextContent, /## Router/);
+    assert.match(contextContent, /vue-router/);
+    assert.match(contextContent, /src\/router/);
+    assert.match(contextContent, /## 状态管理/);
+    assert.match(contextContent, /pinia/);
+    assert.match(contextContent, /src\/store/);
+    assert.match(contextContent, /## API \/ Service 目录/);
+    assert.match(contextContent, /src\/api/);
+    assert.match(contextContent, /src\/service/);
+    assert.match(contextContent, /## Components 目录/);
+    assert.match(contextContent, /src\/components/);
+    assert.match(contextContent, /## Layout 目录/);
+    assert.match(contextContent, /src\/layouts/);
     assert.match(contextContent, /template:project-context/);
     assert.match(contextContent, /Workspace Context Template/);
     assert.match(contextContent, /rule:typescript/);
@@ -87,6 +102,19 @@ async function createVeawProject(projectDirectory: string, workspaceDirectory?: 
   const veawDirectory = path.join(projectDirectory, '.veaw');
 
   await fs.ensureDir(path.join(veawDirectory, 'component-catalog'));
+  await fs.ensureDir(path.join(projectDirectory, 'src', 'router'));
+  await fs.ensureDir(path.join(projectDirectory, 'src', 'store'));
+  await fs.ensureDir(path.join(projectDirectory, 'src', 'api'));
+  await fs.ensureDir(path.join(projectDirectory, 'src', 'service'));
+  await fs.ensureDir(path.join(projectDirectory, 'src', 'components'));
+  await fs.ensureDir(path.join(projectDirectory, 'src', 'layouts'));
+  await writeJsonFile(path.join(projectDirectory, 'package.json'), {
+    dependencies: {
+      'element-plus': '^2.0.0',
+      'vue-router': '^4.0.0',
+      pinia: '^2.0.0',
+    },
+  });
   await writeJsonFile(path.join(veawDirectory, 'project.json'), {
     name: 'demo',
     root: projectDirectory,
@@ -100,6 +128,13 @@ async function createVeawProject(projectDirectory: string, workspaceDirectory?: 
     vite: {
       detected: true,
       configPath: 'vite.config.ts',
+    },
+    packageJson: {
+      dependencies: {
+        'element-plus': '^2.0.0',
+        'vue-router': '^4.0.0',
+        pinia: '^2.0.0',
+      },
     },
     git: {
       branch: 'main',
