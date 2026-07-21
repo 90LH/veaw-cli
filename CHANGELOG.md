@@ -1,5 +1,68 @@
 # Changelog
 
+进入 VEAW 第二阶段开发：构建可组合、可降级、无外部 AI 强依赖的研发上下文能力，并新增“基于 UI 截图调用公司内部组件库 MCP”能力。
+
+总约束：
+
+- 先阅读现有 CLI、测试、Workspace 资源、第一阶段 schema 与资源注册机制。
+- TypeScript strict，禁止 any，最小化修改；默认 stdout-only，所有写入必须显式指定。
+- 不自动上传截图、访问令牌或内部组件数据；不写入 git。
+- MCP 不可用、鉴权失败、截图缺失或查询无结果时必须降级，不阻塞主流程。
+- 不得虚构组件 API、项目约定或 MCP 工具能力；不确定项须明确标注。
+
+实现顺序：
+
+1. 定义共享 schema 与资源注册
+
+- 定义 `screenshot-context`、`component-query-result`、`ui-component-context`、`design-context`、`task-list`、`review-result` 的机器可读 schema。
+- 保持 Workspace resources、CLI assets fallback 与旧版 `.veaw` 兼容。
+
+2. UI 截图上下文
+
+- 只读取用户显式提供的截图或本地测试截图。
+- 记录截图路径/引用、页面或路由、视口、采集时间、关联组件、来源和权限状态。
+- 截图缺失时输出空上下文及降级原因，不中断 ask、plan、task generator。
+
+3. 本地组件查询 fallback
+
+- 基于 component catalog 查询组件名称、Props、Emits、Slots、示例、分类、依赖、使用场景。
+- 查询结果必须带来源证据；MCP 不可用时作为稳定 fallback。
+
+4. 公司内部组件库 MCP
+
+- 先确认真实 MCP 协议、鉴权、资源注册、工具 schema、调用限制和数据安全边界。
+- 新增 MCP adapter，仅在配置存在且用户显式启用时调用。
+- 输入：截图上下文、可选页面需求、本地 catalog 查询结果。
+- 从截图中仅提取可观察的结构信息：布局、控件类型、层级、状态、尺寸/间距特征；每项附置信度和截图证据。
+- 调用内部 MCP 查询候选组件、Props、Emits、Slots、设计 token、示例、依赖和适配约束。
+- 合并 MCP 与本地 catalog 结果：优先推荐项目已有组件，内部库作为补充；去重并保留来源。
+- 输出 `ui-component-context`：截图证据、候选组件、匹配理由、API、风险、不确定项、替代方案。
+- MCP 失败时仅使用本地 catalog，并输出明确的降级原因；不得暴露 token 或内部敏感内容。
+
+5. design-context
+
+- 输入需求、已有路由/组件、截图上下文、组件查询结果。
+- 输出布局结构、交互状态、响应式要求、组件复用建议、设计约束和不确定项。
+- 不绕过现有 Naive UI 与项目组件体系；内容必须机器可读并可供 ask、plan、task generator 使用。
+
+6. task generator
+
+- 输入实施计划和 design-context。
+- 输出有序任务：目标、涉及文件、依赖、验证方式、完成定义、风险。
+- 默认 stdout；只有 `--output` 才允许写文件。
+
+7. review
+
+- 校验：引用文件存在性、组件 API 与 catalog/MCP 证据一致性、路由/store/service 约定、无 any、无虚构依赖、无未授权写入、最小改动原则。
+- 输出 findings、证据、严重等级、最小修复建议；无问题时说明残余风险与测试缺口。
+
+验证：
+
+- 为 MCP adapter 提供 mock 测试：成功、未配置、鉴权失败、超时、空结果、截图缺失、与本地 catalog 冲突。
+- 验证默认命令不创建文件；显式输出才写入。
+- 使用 soybean-admin 做只读端到端验收，不刷新或修改其 `.veaw`，不产生残留。
+- 完成后报告修改文件、schema、命令结果、兼容性和待人工确认的信息。
+
 # v0.3.0（2026-07-21）
 
 ## ✨ 新增（Added）
