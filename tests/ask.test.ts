@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import fs from 'fs-extra';
-import { createAskPrompt, generateAskPrompt, runAskCommand } from '../src/commands/ask.js';
+import { createAskAnswer, createAskPrompt, generateAskAnswer, generateAskPrompt, runAskCommand } from '../src/commands/ask.js';
 
 /**
  * 测试临时目录列表。
@@ -27,6 +27,8 @@ describe('generateAskPrompt', (): void => {
       sessionLogContent: '# Session',
     });
 
+    assert.match(prompt, /# AI 项目上下文包/);
+    assert.match(prompt, /不是模型已经回答后的最终答案/);
     assert.match(prompt, /## 项目背景/);
     assert.match(prompt, /## 技术栈/);
     assert.match(prompt, /## 组件目录/);
@@ -34,6 +36,46 @@ describe('generateAskPrompt', (): void => {
     assert.match(prompt, /## 用户问题/);
     assert.match(prompt, /## 执行约束/);
     assert.match(prompt, /如何新增 ask 命令？/);
+  });
+});
+
+describe('generateAskAnswer', (): void => {
+  it('generates a structured deterministic answer with evidence and gaps', (): void => {
+    const answer = generateAskAnswer({
+      question: '本项目使用什么 UI 库？',
+      contextContent: '- UI 库：naive-ui\n- Service 目录：src/service',
+      projectContent: JSON.stringify({
+        projectInsights: {
+          uiLibraries: ['naive-ui'],
+          router: {
+            packages: ['vue-router'],
+            directories: ['src/router'],
+          },
+          stateManagement: {
+            packages: ['pinia'],
+            directories: ['src/store'],
+          },
+          apiDirectories: {
+            paths: [],
+          },
+          serviceDirectories: {
+            paths: ['src/service'],
+          },
+        },
+      }),
+      catalogContent: JSON.stringify({
+        components: [{ name: 'DemoButton' }],
+      }),
+    });
+
+    assert.match(answer, /## 结论/);
+    assert.match(answer, /UI 库：naive-ui/);
+    assert.match(answer, /路由：vue-router；目录：src\/router/);
+    assert.match(answer, /状态管理：pinia；目录：src\/store/);
+    assert.match(answer, /Service 目录：src\/service/);
+    assert.match(answer, /## 证据来源/);
+    assert.match(answer, /## 缺失上下文/);
+    assert.match(answer, /## 保守建议/);
   });
 });
 
@@ -82,6 +124,21 @@ describe('createAskPrompt', (): void => {
   });
 });
 
+describe('createAskAnswer', (): void => {
+  it('reads .veaw context and returns direct conclusions', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryProjectDirectory();
+
+    await createVeawWorkspace(projectDirectory);
+
+    const answer = await createAskAnswer(projectDirectory, '本项目使用什么 UI 库？');
+
+    assert.match(answer, /## 结论/);
+    assert.match(answer, /UI 库：naive-ui/);
+    assert.match(answer, /路由：vue-router；目录：src\/router/);
+    assert.match(answer, /状态管理：pinia；目录：src\/store/);
+  });
+});
+
 describe('runAskCommand', (): void => {
   it('writes generated prompt to output file', async (): Promise<void> => {
     const projectDirectory = await createTemporaryProjectDirectory();
@@ -112,6 +169,35 @@ describe('runAskCommand', (): void => {
     assert.match(outputContent, /如何 使用 组件？/);
     assert.ok(logs.some((log) => log.includes('如何 使用 组件？')));
   });
+
+  it('prints deterministic answer in answer mode while keeping legacy prompt mode compatible', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryProjectDirectory();
+    const originalCwd = process.cwd();
+    const originalConsoleLog = console.log;
+    const logs: string[] = [];
+
+    await createVeawWorkspace(projectDirectory);
+
+    console.log = (...data: unknown[]): void => {
+      logs.push(data.map(String).join(' '));
+    };
+
+    try {
+      process.chdir(projectDirectory);
+      await runAskCommand(['本项目', '使用什么', 'UI库？'], {
+        answer: true,
+      });
+      await runAskCommand(['本项目', '使用什么', 'UI库？'], {
+        prompt: true,
+      });
+    } finally {
+      process.chdir(originalCwd);
+      console.log = originalConsoleLog;
+    }
+
+    assert.ok(logs.some((log) => log.includes('# VEAW ask 回答任务')));
+    assert.ok(logs.some((log) => log.includes('# AI 项目上下文包')));
+  });
 });
 
 /**
@@ -136,8 +222,30 @@ async function createVeawWorkspace(projectDirectory: string, workspaceDirectory?
   const veawDirectory = path.join(projectDirectory, '.veaw');
 
   await fs.ensureDir(path.join(veawDirectory, 'component-catalog'));
-  await writeFile(path.join(veawDirectory, 'context.md'), '# Demo Context');
-  await writeFile(path.join(veawDirectory, 'project.json'), '{"frameworks":["Vue","Vite"]}');
+  await writeFile(path.join(veawDirectory, 'context.md'), '# Demo Context\n- UI 库：naive-ui\n- Service 目录：src/service');
+  await writeFile(
+    path.join(veawDirectory, 'project.json'),
+    JSON.stringify({
+      frameworks: ['Vue', 'Vite'],
+      projectInsights: {
+        uiLibraries: ['naive-ui'],
+        router: {
+          packages: ['vue-router'],
+          directories: ['src/router'],
+        },
+        stateManagement: {
+          packages: ['pinia'],
+          directories: ['src/store'],
+        },
+        apiDirectories: {
+          paths: [],
+        },
+        serviceDirectories: {
+          paths: ['src/service'],
+        },
+      },
+    }),
+  );
   await writeFile(path.join(veawDirectory, 'component-catalog', 'catalog.json'), '{"components":[]}');
   await writeFile(path.join(veawDirectory, 'session-log.md'), '# Session Log');
 

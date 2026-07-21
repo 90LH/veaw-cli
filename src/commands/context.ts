@@ -351,6 +351,10 @@ function generateContextMarkdown(
     '',
     `> Generated at: ${generatedAt}`,
     '',
+    '## 自动检测事实',
+    '',
+    '以下内容来自 `.veaw/project.json`、`.veaw/component-catalog/catalog.json`、package.json 与项目目录扫描；未从源码或配置确认的信息不会写成事实。',
+    '',
     '## 项目简介',
     '',
     createProjectSummary(projectJson),
@@ -390,6 +394,10 @@ function generateContextMarkdown(
     '## 开发规范',
     '',
     createDevelopmentConventions(projectJson),
+    '',
+    '## 人工维护约定模板',
+    '',
+    createManualConventionGuide(),
     '',
     '## Workspace 模板',
     '',
@@ -670,6 +678,21 @@ function createDevelopmentConventions(projectJson: JsonObject): string {
   ]
     .filter((item): item is string => item !== undefined)
     .join('\n');
+}
+
+/**
+ * 创建人工维护约定模板。
+ *
+ * @returns Markdown 内容。
+ */
+function createManualConventionGuide(): string {
+  return [
+    '- 新页面路由、菜单与权限注册方式：待项目维护者确认；填写时请标注证据文件。',
+    '- Service 请求封装入口与 API 文件组织：待项目维护者确认；填写时请标注证据文件。',
+    '- Pinia/store 模块命名与职责边界：待项目维护者确认；填写时请标注证据文件。',
+    '- Composable、组件和页面职责边界：待项目维护者确认；填写时请标注证据文件。',
+    '- 国际化、权限、错误处理与测试约定：待项目维护者确认；填写时请标注证据文件。',
+  ].join('\n');
 }
 
 /**

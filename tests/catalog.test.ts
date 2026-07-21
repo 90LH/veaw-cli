@@ -50,6 +50,67 @@ describe('runCatalogCommand', (): void => {
     assert.equal(resources.length, 0);
     assert.equal(components.length, 1);
   });
+
+  it('does not misread constants or JSDoc links as component metadata', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-catalog-regression-');
+
+    await fs.ensureDir(path.join(projectDirectory, 'src', 'views', 'login'));
+    await fs.ensureDir(path.join(projectDirectory, 'src', 'components', 'custom'));
+    await writeFile(
+      path.join(projectDirectory, 'src', 'views', 'login', 'index.vue'),
+      [
+        '<script setup lang="ts">',
+        'import { computed } from "vue";',
+        'interface Props {',
+        '  module?: string;',
+        '}',
+        'const props = defineProps<Props>();',
+        'const color = computed(() => {',
+        '  const COLOR_WHITE = "#ffffff";',
+        '  return COLOR_WHITE;',
+        '});',
+        '</script>',
+        '<template><div>{{ props.module }}{{ color }}</div></template>',
+      ].join('\n'),
+    );
+    await writeFile(
+      path.join(projectDirectory, 'src', 'components', 'custom', 'better-scroll.vue'),
+      [
+        '<script setup lang="ts">',
+        'defineOptions({ name: "BetterScroll" });',
+        'interface Props {',
+        '  /**',
+        '   * BetterScroll options',
+        '   *',
+        '   * @link https://better-scroll.github.io/docs/zh-CN/guide/base-scroll-options.html',
+        '   */',
+        '  options: Record<string, unknown>;',
+        '}',
+        'defineProps<Props>();',
+        '</script>',
+        '<template><slot /></template>',
+      ].join('\n'),
+    );
+
+    await runCatalogInDirectory(projectDirectory);
+
+    const catalog = await readJsonObject(path.join(projectDirectory, '.veaw', 'component-catalog', 'catalog.json'));
+    const components = readArray(catalog, 'components');
+    const login = findComponent(components, 'src/views/login/index.vue');
+    const betterScroll = findComponent(components, 'src/components/custom/better-scroll.vue');
+    const betterScrollProps = readArray(betterScroll, 'props');
+
+    assert.equal(readString(login, 'name'), 'Login');
+    assert.equal(readString(login, 'category'), 'page');
+    assert.equal(readString(betterScroll, 'name'), 'BetterScroll');
+    assert.equal(readString(betterScroll, 'category'), 'shared');
+    assert.equal(readBoolean(betterScroll, 'isShared'), true);
+    assert.deepEqual(
+      betterScrollProps.map((prop) => readString(prop, 'name')),
+      ['options'],
+    );
+    assert.ok(readUnknownArray(betterScroll, 'usageHints').length > 0);
+  });
 });
 
 /**
@@ -289,6 +350,19 @@ function readArray(record: Readonly<Record<string, unknown>>, key: string): read
 }
 
 /**
+ * 读取数组字段。
+ *
+ * @param record 对象记录。
+ * @param key 字段名。
+ * @returns 数组字段。
+ */
+function readUnknownArray(record: Readonly<Record<string, unknown>>, key: string): readonly unknown[] {
+  const value = record[key];
+
+  return Array.isArray(value) ? value : [];
+}
+
+/**
  * 读取字符串字段。
  *
  * @param record 对象记录。
@@ -299,6 +373,37 @@ function readString(record: Readonly<Record<string, unknown>>, key: string): str
   const value = record[key];
 
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * 读取布尔字段。
+ *
+ * @param record 对象记录。
+ * @param key 字段名。
+ * @returns 布尔字段。
+ */
+function readBoolean(record: Readonly<Record<string, unknown>>, key: string): boolean | undefined {
+  const value = record[key];
+
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+/**
+ * 查找组件。
+ *
+ * @param components 组件列表。
+ * @param filePath 组件路径。
+ * @returns 组件。
+ */
+function findComponent(
+  components: readonly Record<string, unknown>[],
+  filePath: string,
+): Readonly<Record<string, unknown>> {
+  const component = components.find((item) => readString(item, 'filePath') === filePath);
+
+  assert.ok(component, `Expected component ${filePath}`);
+
+  return component;
 }
 
 /**

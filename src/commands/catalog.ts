@@ -25,6 +25,16 @@ type JsonObject = Record<string, JsonValue>;
 type ComponentFileKind = 'vue' | 'tsx' | 'jsx';
 
 /**
+ * 组件分类。
+ */
+type ComponentCategory = 'shared' | 'page' | 'layout' | 'other';
+
+/**
+ * 依赖语义。
+ */
+type DependencyKind = 'internal-component' | 'internal-file' | 'external-package';
+
+/**
  * 组件属性描述。
  */
 interface ComponentProp {
@@ -94,6 +104,10 @@ interface ComponentDependency {
    * 是否指向已扫描组件。
    */
   readonly internal: boolean;
+  /**
+   * 依赖语义。
+   */
+  readonly dependencyKind?: DependencyKind;
 }
 
 /**
@@ -112,6 +126,14 @@ interface CatalogComponent {
    * 组件文件类型。
    */
   readonly kind: ComponentFileKind;
+  /**
+   * 组件分类。
+   */
+  readonly category: ComponentCategory;
+  /**
+   * 组件运行语义。
+   */
+  readonly componentKind: ComponentCategory;
   /**
    * 文件路径。
    */
@@ -132,6 +154,18 @@ interface CatalogComponent {
    * 依赖关系列表。
    */
   readonly dependencies: readonly ComponentDependency[];
+  /**
+   * 是否为共享组件。
+   */
+  readonly isShared: boolean;
+  /**
+   * 组件使用提示。
+   */
+  readonly usageHints: readonly string[];
+  /**
+   * 引用当前组件的组件。
+   */
+  readonly usedBy?: readonly string[];
   /**
    * 更新时间。
    */
@@ -451,7 +485,7 @@ async function analyzeComponents(
     components.push(await analyzeComponent(filePath, context));
   }
 
-  return components;
+  return attachUsageMetadata(components);
 }
 
 /**
@@ -465,20 +499,116 @@ async function analyzeComponent(filePath: string, context: AnalyzeContext): Prom
   const content = await fs.readFile(filePath, 'utf8');
   const kind = getComponentFileKind(filePath);
   const relativeFilePath = normalizePath(path.relative(context.targetDirectory, filePath));
-  const scriptContent = kind === 'vue' ? extractVueScriptContent(content) : content;
+  const scriptContent = kind === 'vue' ? stripComments(extractVueScriptContent(content)) : stripComments(content);
   const templateContent = kind === 'vue' ? extractVueTemplateContent(content) : '';
+  const category = detectComponentCategory(relativeFilePath);
+  const dependencies = detectDependencies(filePath, content, context);
 
   return {
     id: relativeFilePath,
     name: detectComponentName(filePath, scriptContent),
     kind,
+    category,
+    componentKind: category,
     filePath: relativeFilePath,
     props: detectProps(scriptContent, kind),
     emits: detectEmits(scriptContent),
     slots: detectSlots(scriptContent, templateContent, kind),
-    dependencies: detectDependencies(filePath, content, context),
+    dependencies,
+    isShared: category === 'shared',
+    usageHints: buildUsageHints(category, relativeFilePath, dependencies),
     updatedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * 添加组件使用方元数据。
+ *
+ * @param components 组件列表。
+ * @returns 带使用方元数据的组件列表。
+ */
+function attachUsageMetadata(components: readonly CatalogComponent[]): readonly CatalogComponent[] {
+  const usedByMap = new Map<string, string[]>();
+
+  for (const component of components) {
+    for (const dependency of component.dependencies) {
+      if (dependency.internal !== true || dependency.resolvedPath === undefined) {
+        continue;
+      }
+
+      const users = usedByMap.get(dependency.resolvedPath) ?? [];
+
+      users.push(component.filePath);
+      usedByMap.set(dependency.resolvedPath, users);
+    }
+  }
+
+  return components.map((component) => {
+    const usedBy = usedByMap.get(component.filePath);
+
+    if (usedBy === undefined || usedBy.length === 0) {
+      return component;
+    }
+
+    return {
+      ...component,
+      usedBy: [...new Set(usedBy)].sort((left, right) => left.localeCompare(right)),
+    };
+  });
+}
+
+/**
+ * 检测组件分类。
+ *
+ * @param relativeFilePath 项目相对路径。
+ * @returns 组件分类。
+ */
+function detectComponentCategory(relativeFilePath: string): ComponentCategory {
+  if (relativeFilePath.startsWith('src/components/')) {
+    return 'shared';
+  }
+
+  if (relativeFilePath.startsWith('src/views/')) {
+    return 'page';
+  }
+
+  if (relativeFilePath.startsWith('src/layouts/')) {
+    return 'layout';
+  }
+
+  return 'other';
+}
+
+/**
+ * 创建组件使用提示。
+ *
+ * @param category 组件分类。
+ * @param relativeFilePath 项目相对路径。
+ * @param dependencies 依赖列表。
+ * @returns 使用提示。
+ */
+function buildUsageHints(
+  category: ComponentCategory,
+  relativeFilePath: string,
+  dependencies: readonly ComponentDependency[],
+): readonly string[] {
+  const hints: string[] = [];
+
+  if (category === 'shared') {
+    hints.push('共享组件：复用前确认 props、emits、slots。');
+  } else if (category === 'page') {
+    hints.push('页面组件：优先作为同类业务页面参考。');
+  } else if (category === 'layout') {
+    hints.push('布局组件：修改前确认全局影响范围。');
+  }
+
+  if (dependencies.some((dependency) => dependency.dependencyKind === 'external-package')) {
+    hints.push('包含外部包依赖：复用时确认依赖已在项目中安装。');
+  }
+
+  hints.push(`来源路径：${relativeFilePath}`);
+
+  return hints;
 }
 
 /**
@@ -529,6 +659,18 @@ function extractVueTemplateContent(content: string): string {
 }
 
 /**
+ * 去除 TypeScript/JavaScript 注释，避免 JSDoc、URL 或普通注释被结构解析器误读。
+ *
+ * @param content 原始内容。
+ * @returns 去除注释后的内容。
+ */
+function stripComments(content: string): string {
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+/**
  * 检测组件名称。
  *
  * @param filePath 文件路径。
@@ -554,12 +696,6 @@ function detectComponentName(filePath: string, scriptContent: string): string {
 
   if (functionName?.[1] !== undefined) {
     return functionName[1];
-  }
-
-  const componentVariableName = /(?:const|function)\s+([A-Z][A-Za-z0-9_]*)/.exec(scriptContent);
-
-  if (componentVariableName?.[1] !== undefined) {
-    return componentVariableName[1];
   }
 
   return fallbackComponentName(filePath);
@@ -1101,12 +1237,19 @@ function detectDependencies(
 function createDependency(filePath: string, source: string, context: AnalyzeContext): ComponentDependency {
   const resolvedPath = source.startsWith('.') ? resolveImportPath(filePath, source, context.targetDirectory) : undefined;
   const normalizedResolvedPath = resolvedPath === undefined ? undefined : normalizePath(resolvedPath);
+  const internal = normalizedResolvedPath === undefined ? false : context.componentPathSet.has(normalizedResolvedPath);
+  const dependencyKind: DependencyKind = source.startsWith('.')
+    ? internal
+      ? 'internal-component'
+      : 'internal-file'
+    : 'external-package';
 
   return {
     source,
     relative: source.startsWith('.'),
     resolvedPath: normalizedResolvedPath,
-    internal: normalizedResolvedPath === undefined ? false : context.componentPathSet.has(normalizedResolvedPath),
+    internal,
+    dependencyKind,
   };
 }
 

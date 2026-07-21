@@ -28,6 +28,8 @@ describe('runContextCommand', (): void => {
     const contextContent = await readFile(path.join(projectDirectory, '.veaw', 'context.md'), 'utf8');
 
     assert.match(contextContent, /# VEAW Project Context/);
+    assert.match(contextContent, /## 自动检测事实/);
+    assert.match(contextContent, /未从源码或配置确认的信息不会写成事实/);
     assert.match(contextContent, /## UI 库/);
     assert.match(contextContent, /element-plus/);
     assert.match(contextContent, /## Router/);
@@ -43,6 +45,8 @@ describe('runContextCommand', (): void => {
     assert.match(contextContent, /src\/components/);
     assert.match(contextContent, /## Layout 目录/);
     assert.match(contextContent, /src\/layouts/);
+    assert.match(contextContent, /## 人工维护约定模板/);
+    assert.match(contextContent, /新页面路由、菜单与权限注册方式：待项目维护者确认/);
     assert.match(contextContent, /template:project-context/);
     assert.match(contextContent, /Workspace Context Template/);
     assert.match(contextContent, /rule:typescript/);

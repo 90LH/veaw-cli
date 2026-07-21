@@ -1,5 +1,127 @@
 # Changelog
 
+# v0.3.0（2026-07-21）
+
+## ✨ 新增（Added）
+
+### ask 命令增强
+
+- 新增 `veaw ask --answer` 模式，用于生成结构化项目分析结果。
+- 保留原有 AI Prompt 生成功能，并调整为显式 `--prompt` 模式，避免命令语义歧义。
+- `--answer` 输出统一包含：
+  - 结论
+  - 证据来源
+  - 缺失上下文
+  - 保守建议
+
+- 无外部 AI 能力时，自动降级为可直接提交给 AI 的回答任务，不伪装为模型推理结果。
+
+### plan 命令增强
+
+- 默认改为 stdout 输出。
+- 新增 `--output <file>` 指定输出文件。
+- 输出文件存在时拒绝覆盖。
+- 默认及 `--dry-run` 模式均不会创建 `.veaw/plans` 或任何目录。
+- 生成内容升级为可执行实施计划，包括：
+  - 推荐修改文件
+  - 路由、状态、Service 与组件复用建议
+  - 实施步骤
+  - 验证命令
+  - 风险分析
+  - 验收标准
+  - 上下文缺失项
+
+### Component Catalog
+
+- 新增稳定元数据：
+  - `componentKind`
+  - `category`
+  - `isShared`
+  - `usageHints`
+  - 语义化内部依赖
+  - 可选 `callers` / `usedBy`
+
+- 保持旧版 Catalog Schema 完全兼容。
+
+### Context Generator
+
+- 自动检测内容与人工维护内容正式分离。
+- 新增稳定维护模板：
+  - Architecture
+  - Conventions
+  - Decisions
+  - Routing
+  - Service
+  - Store
+  - Permission
+  - Composable
+  - Component Boundary
+  - i18n
+  - Error Handling
+  - Testing
+
+## 🔧 改进（Changed）
+
+### ask
+
+- 明确 Prompt 与 Answer 两种职责。
+- 改善帮助信息与命令说明。
+- 保持旧版调用方式兼容。
+
+### plan
+
+- 默认行为改为完全非破坏性。
+- stdout 成为默认输出方式。
+- `--dry-run` 与默认行为保持一致。
+
+### Catalog Scanner
+
+- 修正 Vue SFC 名称识别策略。
+- 避免普通常量、CSS 常量及导入标识符被识别为组件名。
+- 优化 Props、Emits、Slots 提取逻辑。
+- 避免 URL、字符串、注释及无关标识符误识别。
+
+### Context Generation
+
+- 区分：
+  - 自动检测事实
+  - 已确认项目约定
+  - 待维护者确认
+
+- 禁止将推断结果写入已确认内容。
+
+## 🧪 测试（Tests）
+
+新增或完善：
+
+- ask 新旧模式兼容测试
+- plan stdout 行为测试
+- plan `--output` 写入测试
+- dry-run 无文件写入测试
+- Catalog 回归测试
+- Context Generator 回归测试
+- Directory Snapshot 测试
+- Schema 兼容性测试
+
+## 🔒 兼容性（Compatibility）
+
+- 保持旧版 `.veaw` 项目兼容。
+- 保持 CLI Assets Fallback 兼容。
+- 保持 `project.json` 自定义字段兼容。
+- 保持 Catalog JSON 消费方兼容。
+- 默认行为全部调整为非破坏性。
+
+## 🚀 为下一阶段准备
+
+完成研发上下文能力基础，为以下能力提供接入点：
+
+- UI Screenshot Context
+- Component MCP
+- Design Context
+- Task Generator
+- Review Pipeline
+- Shared Context Schema
+
 ## v0.2.0（2026-07-20）
 
 ### ✨ 新增（Added）

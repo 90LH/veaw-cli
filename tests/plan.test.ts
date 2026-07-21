@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -27,14 +27,15 @@ describe('generatePlanTemplate', (): void => {
     });
 
     assert.match(template, /## 1\. 需求原文/);
-    assert.match(template, /## 2\. 项目背景和技术栈/);
-    assert.match(template, /## 3\. 相关现有组件与依赖关系/);
-    assert.match(template, /## 4\. Workspace 工作流、模板与技能/);
-    assert.match(template, /## 5\. 推荐修改\/新增文件/);
-    assert.match(template, /## 6\. 实施步骤/);
-    assert.match(template, /## 7\. 风险、兼容性影响与验收标准/);
+    assert.match(template, /# VEAW 实施计划/);
+    assert.match(template, /## 2\. 上下文结论/);
+    assert.match(template, /## 3\. 推荐修改\/新增文件及职责/);
+    assert.match(template, /## 4\. 路由、状态、service 与组件复用路径/);
+    assert.match(template, /## 5\. 分步骤实施内容/);
+    assert.match(template, /## 7\. 风险、兼容性与验收标准/);
     assert.match(template, /新增用户权限配置页面/);
     assert.match(template, /不调用第三方 AI API/);
+    assert.doesNotMatch(template, /请补全以下内容/);
   });
 });
 
@@ -46,9 +47,11 @@ describe('createPlanTemplate', (): void => {
 
     const template = await createPlanTemplate(projectDirectory, '优化课程卡片交互');
 
-    assert.match(template, /# Demo Context/);
-    assert.match(template, /"frameworks":\["Vue","Vite"\]/);
-    assert.match(template, /"components":\[\]/);
+    assert.match(template, /# VEAW 实施计划/);
+    assert.match(template, /路由目录：src\/router/);
+    assert.match(template, /Service 目录：src\/service/);
+    assert.match(template, /组件复用：`src\/components\/advanced\/table-header-operation.vue`/);
+    assert.match(template, /`.veaw\/context.md`：已读取/);
     assert.match(template, /优化课程卡片交互/);
   });
 
@@ -106,15 +109,15 @@ describe('createPlanTemplate', (): void => {
 });
 
 describe('writePlanFile', (): void => {
-  it('writes to default .veaw/plans path', async (): Promise<void> => {
+  it('writes only to explicit output path', async (): Promise<void> => {
     const projectDirectory = await createTemporaryProjectDirectory();
     const outputPath = await writePlanFile({
       targetDirectory: projectDirectory,
       content: '# Plan',
+      output: 'plan.md',
     });
 
-    assert.equal(path.dirname(outputPath), path.join(projectDirectory, '.veaw', 'plans'));
-    assert.match(path.basename(outputPath), /^\d{8}-\d{9}-plan\.md$/);
+    assert.equal(outputPath, path.join(projectDirectory, 'plan.md'));
     assert.equal(await readFile(outputPath, 'utf8'), '# Plan');
   });
 
@@ -137,23 +140,28 @@ describe('writePlanFile', (): void => {
 });
 
 describe('runPlanCommand', (): void => {
-  it('writes default plan file when dry-run is disabled', async (): Promise<void> => {
+  it('prints to terminal by default without creating a plans directory', async (): Promise<void> => {
     const projectDirectory = await createTemporaryProjectDirectory();
     const originalCwd = process.cwd();
+    const originalConsoleLog = console.log;
+    const logs: string[] = [];
 
     await createVeawWorkspace(projectDirectory);
+
+    console.log = (...data: unknown[]): void => {
+      logs.push(data.map(String).join(' '));
+    };
 
     try {
       process.chdir(projectDirectory);
       await runPlanCommand(['新增', '课程', '页面']);
     } finally {
       process.chdir(originalCwd);
+      console.log = originalConsoleLog;
     }
 
-    const planFiles = await readdir(path.join(projectDirectory, '.veaw', 'plans'));
-
-    assert.equal(planFiles.length, 1);
-    assert.match(planFiles[0] ?? '', /-plan\.md$/);
+    assert.ok(logs.some((log) => log.includes('# VEAW 实施计划')));
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'plans')), false);
   });
 
   it('prints only to terminal in dry-run mode', async (): Promise<void> => {
@@ -181,6 +189,33 @@ describe('runPlanCommand', (): void => {
     assert.ok(logs.some((log) => log.includes('新增 课程 页面')));
     assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'plans')), false);
   });
+
+  it('writes a file only when output is provided', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryProjectDirectory();
+    const originalCwd = process.cwd();
+    const originalConsoleLog = console.log;
+    const logs: string[] = [];
+
+    await createVeawWorkspace(projectDirectory);
+
+    console.log = (...data: unknown[]): void => {
+      logs.push(data.map(String).join(' '));
+    };
+
+    try {
+      process.chdir(projectDirectory);
+      await runPlanCommand(['新增', '课程', '页面'], {
+        output: 'plan.md',
+      });
+    } finally {
+      process.chdir(originalCwd);
+      console.log = originalConsoleLog;
+    }
+
+    assert.match(await readFile(path.join(projectDirectory, 'plan.md'), 'utf8'), /# VEAW 实施计划/);
+    assert.ok(logs.some((log) => log.includes('# VEAW 实施计划')));
+    assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw', 'plans')), false);
+  });
 });
 
 /**
@@ -205,9 +240,51 @@ async function createVeawWorkspace(projectDirectory: string, workspaceDirectory?
   const veawDirectory = path.join(projectDirectory, '.veaw');
 
   await fs.ensureDir(path.join(veawDirectory, 'component-catalog'));
-  await writeFile(path.join(veawDirectory, 'context.md'), '# Demo Context');
-  await writeFile(path.join(veawDirectory, 'project.json'), '{"frameworks":["Vue","Vite"]}');
-  await writeFile(path.join(veawDirectory, 'component-catalog', 'catalog.json'), '{"components":[]}');
+  await writeFile(
+    path.join(veawDirectory, 'context.md'),
+    '# Demo Context\n- Vue 组件优先使用 `<script setup lang="ts">` 与 Composition API。',
+  );
+  await writeFile(
+    path.join(veawDirectory, 'project.json'),
+    JSON.stringify({
+      frameworks: ['Vue', 'Vite'],
+      projectInsights: {
+        uiLibraries: ['naive-ui'],
+        router: {
+          directories: ['src/router'],
+        },
+        stateManagement: {
+          directories: ['src/store'],
+        },
+        apiDirectories: {
+          paths: [],
+        },
+        serviceDirectories: {
+          paths: ['src/service'],
+        },
+        componentDirectories: {
+          paths: ['src/components'],
+        },
+        layoutDirectories: {
+          paths: ['src/layouts'],
+        },
+      },
+    }),
+  );
+  await writeFile(
+    path.join(veawDirectory, 'component-catalog', 'catalog.json'),
+    JSON.stringify({
+      components: [
+        {
+          name: 'TableHeaderOperation',
+          filePath: 'src/components/advanced/table-header-operation.vue',
+          props: [],
+          emits: [],
+          slots: [],
+        },
+      ],
+    }),
+  );
 
   if (workspaceDirectory !== undefined) {
     await writeJsonFile(path.join(veawDirectory, 'config.json'), {
