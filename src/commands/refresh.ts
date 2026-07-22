@@ -3,7 +3,7 @@ import { Command } from 'commander';
 import { execa } from 'execa';
 import fs from 'fs-extra';
 import { refreshCatalogGeneratedEntries } from './catalog.js';
-import { runContextCommand } from './context.js';
+import { refreshContextGeneratedSection } from './context.js';
 import type { CatalogGeneratedRefreshResult } from './catalog.js';
 import { logger } from '../utils/logger.js';
 
@@ -365,14 +365,20 @@ async function createRefreshSummary(input: {
     }
 
     if (targets.context.length > 0) {
-      await runContextGeneratedRefresh();
+      const contextResult = await refreshContextGeneratedSection(targetDirectory, true);
+
       actions.push({
         target: 'context',
         operation: 'refresh-generated-section',
         mode: 'write-generated',
         files: targets.context,
+        changed: contextResult.changed,
+        wrote: contextResult.wrote,
       });
-      writes.push('.veaw/context.md');
+
+      if (contextResult.wrote) {
+        writes.push(toProjectPath(targetDirectory, contextResult.contextPath));
+      }
     }
   }
 
@@ -458,6 +464,7 @@ function createCatalogWriteAction(result: CatalogGeneratedRefreshResult): JsonOb
     scannedFiles: result.scannedFiles,
     removedFiles: result.removedFiles,
     componentCount: result.componentCount,
+    changed: result.changed,
     wrote: result.wrote,
   };
 }
@@ -499,9 +506,9 @@ function createChangedOptionChanges(value: string | readonly string[] | undefine
  */
 async function readGitAutoChangedFiles(targetDirectory: string): Promise<GitAutoChanges> {
   const outputs = await Promise.all([
-    readGitChangeSource(targetDirectory, 'working-tree', ['diff', '--name-only']),
-    readGitChangeSource(targetDirectory, 'staged', ['diff', '--cached', '--name-only']),
-    readGitChangeSource(targetDirectory, 'untracked', ['ls-files', '--others', '--exclude-standard']),
+    readGitChangeSource(targetDirectory, 'working-tree', ['diff', '--name-status', '-z', '--find-renames'], true),
+    readGitChangeSource(targetDirectory, 'staged', ['diff', '--cached', '--name-status', '-z', '--find-renames'], true),
+    readGitChangeSource(targetDirectory, 'untracked', ['ls-files', '--others', '--exclude-standard', '-z'], false),
   ]);
 
   return {
@@ -522,10 +529,13 @@ async function readGitChangeSource(
   targetDirectory: string,
   source: RefreshChangeSourceDetail,
   args: readonly string[],
+  nameStatus: boolean,
 ): Promise<{ readonly source: RefreshChangeSourceDetail; readonly files: readonly string[] }> {
+  const output = await gitCommandRunner(targetDirectory, args);
+
   return {
     source,
-    files: splitOutputLines(await gitCommandRunner(targetDirectory, args)),
+    files: nameStatus ? parseGitNameStatusOutput(output) : splitNullOutput(output),
   };
 }
 
@@ -554,8 +564,49 @@ async function runGitCommandWithExeca(targetDirectory: string, args: readonly st
  * @param output 命令输出。
  * @returns 非空行。
  */
-function splitOutputLines(output: string): readonly string[] {
-  return output.split(/\r?\n/g).map((line) => line.trim()).filter((line) => line.length > 0);
+function splitNullOutput(output: string): readonly string[] {
+  return output.split('\0').filter((value) => value.length > 0);
+}
+
+function parseGitNameStatusOutput(output: string): readonly string[] {
+  const values = splitNullOutput(output);
+  const files: string[] = [];
+
+  for (let index = 0; index < values.length;) {
+    const status = values[index];
+
+    if (status === undefined) {
+      break;
+    }
+
+    index += 1;
+
+    if (status.startsWith('R') || status.startsWith('C')) {
+      const sourcePath = values[index];
+      const targetPath = values[index + 1];
+
+      if (status.startsWith('R') && sourcePath !== undefined) {
+        files.push(sourcePath);
+      }
+
+      if (targetPath !== undefined) {
+        files.push(targetPath);
+      }
+
+      index += 2;
+      continue;
+    }
+
+    const filePath = values[index];
+
+    if (filePath !== undefined) {
+      files.push(filePath);
+    }
+
+    index += 1;
+  }
+
+  return files;
 }
 
 /**
@@ -703,50 +754,6 @@ function isContextInputPath(filePath: string): boolean {
 async function assertExistingVeawWorkspace(targetDirectory: string): Promise<void> {
   if (!(await fs.pathExists(path.join(targetDirectory, VEAW_DIRECTORY_NAME)))) {
     throw new Error('未检测到 .veaw 工作区，refresh 不会执行 init、sync 或 migrate');
-  }
-}
-
-/**
- * 运行现有 context 生成流程。
- */
-async function runContextGeneratedRefresh(): Promise<void> {
-  const previousExitCode = process.exitCode;
-
-  try {
-    process.exitCode = undefined;
-    await withMutedConsole(runContextCommand);
-
-    if (process.exitCode !== undefined && process.exitCode !== 0) {
-      throw new Error('现有 context 生成流程执行失败');
-    }
-  } finally {
-    process.exitCode = previousExitCode;
-  }
-}
-
-/**
- * 静默执行回调。
- *
- * @param callback 回调。
- */
-async function withMutedConsole(callback: () => Promise<void>): Promise<void> {
-  const originalLog = console.log;
-  const originalWarn = console.warn;
-  const originalError = console.error;
-  const mutedConsole = (...data: unknown[]): void => {
-    void data;
-  };
-
-  console.log = mutedConsole;
-  console.warn = mutedConsole;
-  console.error = mutedConsole;
-
-  try {
-    await callback();
-  } finally {
-    console.log = originalLog;
-    console.warn = originalWarn;
-    console.error = originalError;
   }
 }
 

@@ -1,155 +1,558 @@
 # VEAW CLI
 
-VEAW CLI 是 `Workspace -> Resource Loader -> CLI -> Project` 架构中的命令行层。它负责发现 Workspace、读取 Registry、安装资源到项目 `.veaw/`，并为 AI 生成上下文、prompt、计划和声明式命令输入。
+> Vue Enterprise AI Workspace CLI
+> 面向企业级 Vue 项目的 AI 工程上下文基础设施。
 
-CLI 不直接调用第三方 AI Provider。`ask`、`plan`、Workspace command 当前都只生成 AI-ready 输入。
+VEAW CLI 是 `Workspace -> Resource Loader -> CLI -> Project` 架构中的命令行层。
 
-## Architecture
+它负责：
+
+* 发现和加载 AI Workspace
+* 读取 Registry 资源
+* 安装资源到项目 `.veaw/`
+* 分析项目结构与组件体系
+* 生成 AI 可理解的项目上下文
+* 为 AI 提供 prompt、plan、workflow 输入
+
+VEAW CLI **不直接调用第三方 AI Provider**。
+
+`ask`、`plan`、Workspace command 当前只负责生成 AI-ready 输入，由用户交给：
+
+* ChatGPT
+* Claude
+* Codex
+* DeepSeek
+* Kimi
+* 其他 AI 工具
+
+执行。
+
+---
+
+# Architecture
 
 ```text
-veaw Workspace
-  -> registries/*.json
-  -> Resource Loader
-  -> built-in CLI commands
-  -> project/.veaw
+                    AI Workspace
+
+              registries/*.json
+                     |
+                     v
+              Resource Loader
+                     |
+                     v
+              VEAW CLI Commands
+                     |
+                     v
+                  Project
+
+                  .veaw/
+        ┌────────────────────────┐
+        │ project.json           │
+        │ context.md             │
+        │ component-catalog      │
+        │ resources.lock.json    │
+        │ session-log.md         │
+        └────────────────────────┘
+                     |
+                     v
+
+              AI-ready Context
 ```
 
-Workspace 不可发现时，CLI 会回退到内置 `assets/`，保证旧项目仍可初始化。
+---
 
-## Resource Loader
+# Core Design
 
-Resource Loader 当前提供：
+## AI Provider 无关
 
-- Workspace discovery：`--workspace`、`VEAW_WORKSPACE`、项目 `.veaw/config.json`、向上查找、CLI assets fallback。
-- Registry reader：读取顶层 registry 和子 registry，校验 schema version、resource sourcePath。
-- Resource resolver：按 id、type、tag 和 dependencies 解析资源。
-- Materializer：支持 `copy`、`reference`、`render`、`none`。
-- Lockfile：读写 `.veaw/resources.lock.json`。
-- Workspace command loader：读取和执行安全声明式 command。
+VEAW 不负责：
 
-## Commands
+* 调用模型 API
+* 管理 API Key
+* 绑定 AI 平台
 
-| Command | 职责 |
-|---------|------|
-| `veaw init [--workspace <path>]` | 初始化项目 `.veaw/`，优先从 Workspace Registry 安装资源，无法发现 Workspace 时使用 CLI assets fallback |
-| `veaw sync [--workspace <path>]` | 比较 Registry 与 `resources.lock.json`，增量同步新增、变更、缺失、冲突资源，并刷新项目画像 |
-| `veaw catalog` | 扫描组件目录，并从 extension/template Registry 写入可用 Catalog 资源索引 |
-| `veaw context` | 从 template/rule Registry、`project.json` 和 component catalog 生成长期上下文 |
-| `veaw ask <question>` | 从 prompt/rule/skill Registry 和项目事实组装 AI-ready prompt |
-| `veaw plan <requirement>` | 从 workflow/template/skill Registry 和项目事实生成实施计划输入 |
-| `veaw commands list [--workspace <path>]` | 列出 Workspace 声明式 command |
-| `veaw commands run <command> key=value` | 解析参数并执行安全声明式 Workspace command |
-| `veaw session ...` | 管理 `.veaw/session-log.md` 会话记录 |
-| `veaw doctor` | 检查本地环境 |
-| `veaw version` | 输出 CLI 版本 |
+VEAW 只负责：
 
-## Built-in vs Workspace Commands
+> 将企业项目知识转换为 AI 可以消费的上下文。
 
-内置 TypeScript command 负责稳定的 CLI 行为：
+---
 
-- 文件创建和更新
-- Registry 读取和物化
-- 项目事实扫描
-- lockfile 增量同步
-- 参数校验和错误处理
+## 项目优先
 
-Workspace 声明式 command 负责产品级 AI 工作流入口：
+所有上下文来源于：
 
-- command 名称、描述和参数 schema
-- 依赖资源
-- 安全 execution 类型
-- 生成 AI-ready 输入
+* 真实代码
+* 项目配置
+* Git 状态
+* 组件结构
+* Workspace 资源
 
-Workspace command 不允许执行任意 shell 或任意 JavaScript。
+而不是人工维护文档。
 
-当前支持的声明式 execution：
+---
 
-- `generate-prompt`
-- `render-template`
-- `call-workflow`
+## 最小侵入
 
-## Quick Start
+VEAW：
 
-在用户项目根目录执行：
+* 不修改业务代码
+* 不改变项目目录
+* 不接管开发流程
+
+只维护：
+
+```text
+.veaw/
+```
+
+目录。
+
+---
+
+# Resource Loader
+
+Resource Loader 是 VEAW 的核心资源解析层。
+
+当前能力：
+
+## Workspace Discovery
+
+支持：
+
+优先级：
+
+1. `--workspace`
+2. `VEAW_WORKSPACE`
+3. 项目 `.veaw/config.json`
+4. 父级目录向上查找
+5. CLI 内置 `assets/` fallback
+
+当 Workspace 不可发现时：
+
+自动降级到 CLI 内置资源。
+
+保证旧项目仍可以初始化。
+
+---
+
+## Registry Reader
+
+支持：
+
+* 顶层 Registry
+* 子 Registry
+* schema version 校验
+* sourcePath 校验
+
+---
+
+## Resource Resolver
+
+支持：
+
+* id
+* type
+* tag
+* dependencies
+
+解析资源依赖关系。
+
+---
+
+## Materializer
+
+支持资源落地方式：
+
+* `copy`
+* `reference`
+* `render`
+* `none`
+
+---
+
+## Lockfile
+
+维护：
+
+```text
+.veaw/resources.lock.json
+```
+
+记录：
+
+* 已安装资源
+* 版本
+* hash
+* 来源
+* 状态
+
+支持增量同步。
+
+---
+
+# Commands
+
+| Command              | 职责                         |
+| -------------------- | -------------------------- |
+| `veaw init`          | 初始化项目 `.veaw/`             |
+| `veaw sync`          | 增量同步 Workspace Registry 资源 |
+| `veaw catalog`       | 扫描项目组件并生成组件索引              |
+| `veaw context`       | 生成 AI 项目上下文                |
+| `veaw status`        | 分析当前项目变化                   |
+| `veaw refresh`       | 根据代码变化刷新 AI 状态             |
+| `veaw ask`           | 生成 AI-ready 问题上下文          |
+| `veaw plan`          | 根据需求生成实施计划输入               |
+| `veaw commands list` | 查看 Workspace command       |
+| `veaw commands run`  | 执行安全声明式 command            |
+| `veaw session`       | 管理 AI 会话记录                 |
+| `veaw doctor`        | 环境检查                       |
+| `veaw version`       | 输出版本                       |
+
+---
+
+# Project Intelligence
+
+## Component Catalog
+
+命令：
 
 ```bash
-veaw init --workspace D:\test-project\AI-Workspace\veaw
-veaw sync
 veaw catalog
-veaw context
-veaw ask "如何新增一个列表页？"
-veaw plan "新增用户管理页面"
-veaw commands list
-veaw commands run new-page page_name=UserList route_path=/users description="用户列表页"
 ```
 
-无 Workspace 时仍可初始化：
+生成：
+
+```text
+.veaw/component-catalog/catalog.json
+```
+
+用于描述：
+
+* 公共组件
+* 页面组件
+* 布局组件
+* 业务模块
+
+支持：
+
+* 全量扫描
+* 增量刷新
+* 删除同步
+* 用户字段保留
+
+---
+
+## Project Context
+
+命令：
+
+```bash
+veaw context
+```
+
+生成：
+
+```text
+.veaw/context.md
+```
+
+包含：
+
+* 技术栈
+* 项目结构
+* 路由
+* 状态管理
+* UI 框架
+* API 约定
+* 组件体系
+
+供 AI 理解项目。
+
+---
+
+## Git Change Awareness
+
+命令：
+
+```bash
+veaw status
+```
+
+分析：
+
+* working tree
+* staged files
+* untracked files
+
+用于：
+
+* 精确刷新上下文
+* 避免 AI 获取过时信息
+
+---
+
+## Refresh Workflow
+
+命令：
+
+```bash
+veaw refresh
+```
+
+流程：
+
+```text
+Git Changes
+
+    |
+    v
+
+Component Update
+
+    |
+    v
+
+Catalog Refresh
+
+    |
+    v
+
+Context Refresh
+
+    |
+    v
+
+AI Context Updated
+```
+
+特点：
+
+* 不覆盖用户修改
+* 内容无变化不写入
+* 支持删除和重命名同步
+
+---
+
+# Built-in vs Workspace Commands
+
+## Built-in Commands
+
+TypeScript 实现。
+
+负责：
+
+* 文件操作
+* Registry 解析
+* 项目扫描
+* lockfile 管理
+* 参数校验
+
+---
+
+## Workspace Commands
+
+声明式 AI 工作流入口。
+
+负责：
+
+* command 描述
+* 参数 schema
+* 资源依赖
+* AI 输入生成
+
+禁止：
+
+* 任意 shell 执行
+* 任意 JavaScript 执行
+
+当前 execution：
+
+* `generate-prompt`
+* `render-template`
+* `call-workflow`
+
+---
+
+# Quick Start
+
+进入 Vue 项目：
+
+```bash
+cd your-project
+```
+
+初始化：
 
 ```bash
 veaw init
 ```
 
-这会使用 CLI 内置 `assets/` 创建兼容的 `.veaw/`。
+指定 Workspace：
 
-## Project Files
+```bash
+veaw init --workspace D:\AI-Workspace\veaw
+```
 
-CLI 会维护：
+生成上下文：
+
+```bash
+veaw catalog
+
+veaw context
+```
+
+查看变化：
+
+```bash
+veaw status
+```
+
+刷新：
+
+```bash
+veaw refresh
+```
+
+生成 AI 输入：
+
+```bash
+veaw ask "如何新增一个列表页？"
+
+veaw plan "新增用户管理页面"
+```
+
+---
+
+# Project Files
 
 ```text
 .veaw/
-├── assets/                         # fallback assets
-├── component-catalog/catalog.json
-├── config.json                     # workspace/config snapshot
+
+├── assets/
+│
+├── component-catalog/
+│   └── catalog.json
+│
+├── config.json
+│
+├── project.json
+│
 ├── context.md
-├── project.json                    # project facts, custom fields preserved
-├── resources.lock.json             # installed registry resources
+│
+├── resources.lock.json
+│
 ├── session-log.md
-└── resources/                      # materialized Workspace resources
+│
+└── resources/
 ```
 
-## Compatibility
+---
 
-- 旧 `.veaw/project.json` 自定义字段会保留。
-- 旧项目没有 `resources.lock.json` 时，`init` / `sync` 可迁移。
-- Workspace 丢失时，`sync` 会提示并跳过资源同步，不破坏旧项目。
-- CLI `assets/` fallback 未移除。
+# Compatibility
 
-## Development
+支持：
+
+* 保留旧项目 `.veaw/project.json` 自定义字段
+* 无 lockfile 项目迁移
+* Workspace 丢失 fallback
+* CLI assets fallback
+
+---
+
+# Development
+
+安装：
 
 ```bash
 pnpm install
+```
+
+验证：
+
+```bash
 pnpm run typecheck
+
 pnpm run test
+
 pnpm run build
 ```
 
-开发模式：
+开发：
 
 ```bash
-pnpm run dev -- commands list --workspace D:\test-project\AI-Workspace\veaw
+pnpm run dev -- commands list --workspace ./workspace
 ```
 
-## Test Coverage
+---
 
-当前测试覆盖：
+# Test Coverage
 
-- Workspace discovery 与 fallback
-- Registry schema 版本错误
-- dependency resolver
-- materializer / lockfile
-- init Workspace 初始化、fallback 初始化、旧项目字段保留、幂等性
-- sync 增量、冲突、Workspace 版本变化、旧项目迁移、Workspace 丢失
-- context / ask / plan / catalog 消费 Registry 资源
-- Workspace commands list/run、未知 command、参数非法、资源缺失、版本不兼容
+当前覆盖：
 
-## v1.0 前仍需完成
+## Workspace
 
-- 更完整的资源安装状态模型：target hash、安装状态、冲突状态。
-- Project migration 命令，覆盖更多旧项目路径。
-- Registry schema 校验命令和修复建议。
-- 更细的资源选择策略：preset、tag profile、项目类型。
-- 声明式 command 的输出路径和 workflow 编排能力增强，但仍保持安全边界。
+* discovery
+* fallback
+* registry 校验
 
-## License
+## Resource System
+
+* resolver
+* dependency
+* materializer
+* lockfile
+
+## Project
+
+* init
+* sync
+* migration
+* catalog
+* context
+* refresh
+
+## AI Workflow
+
+* ask
+* plan
+* session
+* workspace command
+
+---
+
+# Current Status
+
+## 已实现
+
+✅ Workspace 架构
+✅ Registry 系统
+✅ Resource Loader
+✅ CLI 初始化
+✅ 项目上下文生成
+✅ Component Catalog
+✅ Git 状态分析
+✅ Refresh 工作流
+✅ AI-ready Prompt
+✅ 声明式 Command
+
+---
+
+# v1.0 前规划
+
+* 更完整资源安装状态模型
+* Project migration 工具
+* Registry 自动修复建议
+* preset/profile 资源组合
+* 更强 workflow 编排能力
+
+暂不包含：
+
+* AI Agent 自动执行
+* MCP Provider 调度
+* 自动代码修改系统
+
+---
+
+# License
 
 MIT

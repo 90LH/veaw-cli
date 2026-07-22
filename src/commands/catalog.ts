@@ -301,6 +301,10 @@ export interface CatalogGeneratedRefreshResult {
    */
   readonly componentCount: number;
   /**
+   * catalog 内容是否发生变化。
+   */
+  readonly changed: boolean;
+  /**
    * 是否发生写入。
    */
   readonly wrote: boolean;
@@ -366,7 +370,9 @@ export async function runCatalogCommand(): Promise<void> {
   try {
     const context = createCatalogContext(process.cwd());
     const componentFiles = await scanComponentFiles(context.targetDirectory);
-    const componentPathSet = new Set(componentFiles.map((filePath) => normalizePath(filePath)));
+    const componentPathSet = new Set(
+      componentFiles.map((filePath) => normalizePath(path.relative(context.targetDirectory, filePath))),
+    );
     const analyzeContext: AnalyzeContext = {
       targetDirectory: context.targetDirectory,
       componentPathSet,
@@ -375,11 +381,14 @@ export async function runCatalogCommand(): Promise<void> {
     const availableResources = await readCatalogRegistryResources(context.targetDirectory);
     const existingCatalog = await readExistingCatalog(context.catalogPath);
     const nextCatalog = mergeCatalog(existingCatalog, components, availableResources);
+    const changed = !areJsonValuesEqual(existingCatalog, nextCatalog);
 
-    await fs.ensureDir(context.componentCatalogDirectory);
-    await fs.outputJson(context.catalogPath, nextCatalog, {
-      spaces: 2,
-    });
+    if (changed) {
+      await fs.ensureDir(context.componentCatalogDirectory);
+      await fs.outputJson(context.catalogPath, nextCatalog, {
+        spaces: 2,
+      });
+    }
 
     logger.success(`组件目录同步完成：${components.length} 个组件`);
   } catch (error: unknown) {
@@ -407,7 +416,7 @@ export async function refreshCatalogGeneratedEntries(
   const componentPathSet = new Set([
     ...readExistingComponentPaths(existingComponents),
     ...changedComponentFiles.map((filePath) => normalizePath(path.relative(context.targetDirectory, filePath))),
-  ]);
+  ].filter((filePath) => !removedFiles.includes(filePath)));
   const analyzeContext: AnalyzeContext = {
     targetDirectory: context.targetDirectory,
     componentPathSet,
@@ -418,12 +427,19 @@ export async function refreshCatalogGeneratedEntries(
     changedComponents.push(await analyzeComponent(filePath, analyzeContext));
   }
 
-  const mergedComponents = attachUsageMetadata(
-    mergeIncrementalComponents(existingComponents, changedComponents, removedFiles),
+  const mergedComponents = stabilizeComponents(
+    existingComponents,
+    attachUsageMetadata(
+      mergeIncrementalComponents(existingComponents, changedComponents, removedFiles).map((component) =>
+        refreshDependencyMetadata(component, componentPathSet),
+      ),
+    ),
   );
   const nextCatalog = createCatalogObject(existingCatalog, mergedComponents, readExistingCatalogResources(existingCatalog));
+  const changed = !areJsonValuesEqual(existingCatalog, nextCatalog);
+  const wrote = input.writeGenerated && changed;
 
-  if (input.writeGenerated && (changedComponentFiles.length > 0 || removedFiles.length > 0)) {
+  if (wrote) {
     await fs.ensureDir(context.componentCatalogDirectory);
     await fs.outputJson(context.catalogPath, nextCatalog, {
       spaces: 2,
@@ -435,7 +451,8 @@ export async function refreshCatalogGeneratedEntries(
     scannedFiles: changedComponentFiles.map((filePath) => normalizePath(path.relative(context.targetDirectory, filePath))),
     removedFiles,
     componentCount: mergedComponents.length,
-    wrote: input.writeGenerated && (changedComponentFiles.length > 0 || removedFiles.length > 0),
+    changed,
+    wrote,
   };
 }
 
@@ -1447,7 +1464,10 @@ function mergeCatalog(
   availableResources: readonly CatalogResourceSummary[],
 ): JsonObject {
   const existingComponents = readExistingComponents(existingCatalog);
-  const mergedComponents = mergeComponents(existingComponents, components);
+  const mergedComponents = stabilizeComponents(
+    existingComponents,
+    attachUsageMetadata(mergeComponents(existingComponents, components)),
+  );
 
   return createCatalogObject(existingCatalog, mergedComponents, availableResources);
 }
@@ -1466,18 +1486,31 @@ function createCatalogObject(
   availableResources: readonly CatalogResourceSummary[],
 ): JsonObject {
   const now = new Date().toISOString();
+  const generatedAt = readExistingString(existingCatalog, 'generatedAt') ?? now;
+  const existingUpdatedAt = readExistingString(existingCatalog, 'updatedAt');
   const baseCatalog: ComponentCatalog = {
     version: CATALOG_VERSION,
-    generatedAt: readExistingString(existingCatalog, 'generatedAt') ?? now,
-    updatedAt: now,
+    generatedAt,
+    updatedAt: existingUpdatedAt ?? now,
     scanRoots: SCAN_ROOTS,
     availableResources,
     components,
   };
-
-  return {
+  const nextCatalog = {
     ...(existingCatalog ?? {}),
     ...toJsonObject(baseCatalog),
+  };
+
+  if (
+    existingCatalog !== undefined &&
+    areJsonValuesEqual(stripCatalogUpdatedAt(existingCatalog), stripCatalogUpdatedAt(nextCatalog))
+  ) {
+    return nextCatalog;
+  }
+
+  return {
+    ...nextCatalog,
+    updatedAt: now,
   };
 }
 
@@ -1518,18 +1551,72 @@ function mergeComponents(
     }
   }
 
-  const mergedComponents = nextComponents.map((component) => {
+  return nextComponents.map((component) => {
     const existingComponent = existingComponentMap.get(component.filePath);
 
-    existingComponentMap.delete(component.filePath);
+    return mergeComponent(existingComponent, component);
+  });
+}
+
+function mergeComponent(
+  existingComponent: JsonObject | undefined,
+  nextComponent: CatalogComponent,
+): CatalogComponent {
+  const now = new Date().toISOString();
+  const nextComponentObject = toJsonObject(nextComponent);
+  const existingUpdatedAt = readExistingString(existingComponent, 'updatedAt');
+  const mergedComponent: JsonObject = {
+    ...(existingComponent ?? {}),
+    ...nextComponentObject,
+    updatedAt: existingUpdatedAt ?? now,
+  };
+
+  if (
+    existingComponent === undefined ||
+    !areJsonValuesEqual(stripUpdatedAt(existingComponent), stripUpdatedAt(mergedComponent))
+  ) {
+    mergedComponent.updatedAt = now;
+  }
+
+  return mergedComponent as unknown as CatalogComponent;
+}
+
+function stabilizeComponents(
+  existingComponents: readonly JsonObject[],
+  components: readonly CatalogComponent[],
+): readonly CatalogComponent[] {
+  const existingComponentMap = new Map(
+    existingComponents
+      .filter((component) => typeof component.filePath === 'string')
+      .map((component) => [component.filePath as string, component]),
+  );
+
+  return components.map((component) => mergeComponent(existingComponentMap.get(component.filePath), component));
+}
+
+function refreshDependencyMetadata(
+  component: CatalogComponent,
+  componentPathSet: ReadonlySet<string>,
+): CatalogComponent {
+  const dependencies = component.dependencies.map((dependency) => {
+    const internal = dependency.resolvedPath !== undefined && componentPathSet.has(dependency.resolvedPath);
 
     return {
-      ...(existingComponent ?? {}),
-      ...toJsonObject(component),
-    } as unknown as CatalogComponent;
+      ...dependency,
+      internal,
+      dependencyKind: dependency.relative
+        ? internal
+          ? 'internal-component' as const
+          : 'internal-file' as const
+        : 'external-package' as const,
+    };
   });
 
-  return [...mergedComponents, ...([...existingComponentMap.values()] as unknown as CatalogComponent[])];
+  return {
+    ...component,
+    dependencies,
+    usageHints: buildUsageHints(component.category, component.filePath, dependencies),
+  };
 }
 
 /**
@@ -1563,10 +1650,7 @@ function mergeIncrementalComponents(
       continue;
     }
 
-    mergedComponents.push({
-      ...component,
-      ...toJsonObject(changedComponent),
-    } as unknown as CatalogComponent);
+    mergedComponents.push(mergeComponent(component, changedComponent));
     changedComponentMap.delete(filePath);
   }
 
@@ -1654,6 +1738,22 @@ function resolveRemovedComponentFiles(targetDirectory: string, changedFiles: rea
  */
 function isCatalogInputFile(filePath: string): boolean {
   return SCAN_ROOTS.some((scanRoot) => filePath.startsWith(`${scanRoot}/`)) && isComponentFile(filePath);
+}
+
+function stripCatalogUpdatedAt(catalog: JsonObject): JsonObject {
+  return stripUpdatedAt(catalog);
+}
+
+function stripUpdatedAt(object: JsonObject): JsonObject {
+  const value = { ...object };
+
+  delete value.updatedAt;
+
+  return value;
+}
+
+function areJsonValuesEqual(left: JsonValue | undefined, right: JsonValue): boolean {
+  return left !== undefined && JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**

@@ -33,6 +33,10 @@ interface RefreshSummary {
    */
   readonly changedFiles: readonly string[];
   /**
+   * 动作摘要。
+   */
+  readonly actions: readonly JsonObject[];
+  /**
    * 写入文件。
    */
   readonly writes: readonly string[];
@@ -297,19 +301,16 @@ describe('runRefreshCommand', (): void => {
     setRefreshGitCommandRunnerForTest(async (targetDirectory, args): Promise<string> => {
       calls.push({ targetDirectory, args: [...args] });
 
-      if (args.length === 2 && args[0] === 'diff' && args[1] === '--name-only') {
-        return [
-          ' src\\views\\permissionManagement\\index.vue ',
-          'src/views/permissionManagement/index.vue',
-        ].join('\n');
+      if (args[0] === 'diff' && args[1] === '--name-status' && !args.includes('--cached')) {
+        return 'M\0src/views/permissionManagement/index.vue\0';
       }
 
-      if (args.length === 3 && args[0] === 'diff' && args[1] === '--cached' && args[2] === '--name-only') {
-        return 'src\\router\\index.ts';
+      if (args[0] === 'diff' && args.includes('--cached') && args.includes('--name-status')) {
+        return 'M\0src/router/index.ts\0';
       }
 
-      if (args.length === 3 && args[0] === 'ls-files') {
-        return 'src/api/untracked.ts';
+      if (args[0] === 'ls-files') {
+        return 'src/api/untracked.ts\0';
       }
 
       if (args[0] === 'log') {
@@ -393,6 +394,84 @@ describe('runRefreshCommand', (): void => {
     assert.equal(summary.changedFiles.includes('.gitignore'), false);
     assert.equal(summary.changedFiles.includes('opengrpc/module/rb/dragon.ts'), false);
     assertSkippedReason(summary, null);
+  });
+
+  it('handles component renames and reports no-op writes accurately', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-refresh-rename-');
+    const oldPath = path.join(projectDirectory, 'src', 'components', 'DemoButton.vue');
+    const newPath = path.join(projectDirectory, 'src', 'components', '重命名按钮.vue');
+
+    await createRefreshProject(projectDirectory);
+    await initializeGitRepository(projectDirectory);
+    await fs.move(oldPath, newPath);
+
+    const renameOutput = await runRefreshInDirectory(projectDirectory);
+    const renameSummary = parseSummary(renameOutput);
+    const renamedCatalog = await readJsonObject(
+      path.join(projectDirectory, '.veaw', 'component-catalog', 'catalog.json'),
+    );
+    const renamedComponents = readArray(renamedCatalog, 'components');
+
+    assert.ok(renameSummary.changedFiles.includes('src/components/DemoButton.vue'));
+    assert.ok(renameSummary.changedFiles.includes('src/components/重命名按钮.vue'));
+    assert.equal(renamedComponents.some((component) => readString(component, 'filePath') === 'src/components/DemoButton.vue'), false);
+    assert.ok(findComponent(renamedComponents, 'src/components/重命名按钮.vue'));
+    assert.deepEqual(renameSummary.writes, ['.veaw/component-catalog/catalog.json']);
+
+    const noOpOutput = await runRefreshInDirectory(projectDirectory);
+    const noOpSummary = parseSummary(noOpOutput);
+    const catalogAction = noOpSummary.actions.find((action) => action.target === 'catalog');
+
+    assert.deepEqual(noOpSummary.writes, []);
+    assert.equal(catalogAction?.changed, false);
+    assert.equal(catalogAction?.wrote, false);
+  });
+
+  it('cleans dependency and usedBy metadata after a component is deleted', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-refresh-delete-dependency-');
+    const demoButtonPath = path.join(projectDirectory, 'src', 'components', 'DemoButton.vue');
+
+    await createRefreshProject(projectDirectory);
+    await writeFile(
+      path.join(projectDirectory, 'src', 'layouts', 'AppShell.vue'),
+      [
+        '<script setup lang="ts">',
+        "import DemoButton from '../components/DemoButton.vue';",
+        '</script>',
+        '<template><main><DemoButton label="Demo" /></main></template>',
+        '',
+      ].join('\n'),
+    );
+    await runRefreshInDirectory(projectDirectory, {
+      changed: ['src/components/DemoButton.vue', 'src/layouts/AppShell.vue'],
+    });
+    await fs.remove(demoButtonPath);
+    await runRefreshInDirectory(projectDirectory, { changed: ['src/components/DemoButton.vue'] });
+
+    const catalog = await readJsonObject(path.join(projectDirectory, '.veaw', 'component-catalog', 'catalog.json'));
+    const components = readArray(catalog, 'components');
+    const appShell = findComponent(components, 'src/layouts/AppShell.vue');
+    const dependencies = readArray(appShell, 'dependencies');
+
+    assert.equal(components.some((component) => readString(component, 'filePath') === 'src/components/DemoButton.vue'), false);
+    assert.equal(dependencies[0]?.internal, false);
+    assert.equal(dependencies[0]?.dependencyKind, 'internal-file');
+    assert.equal(appShell.usedBy, undefined);
+  });
+
+  it('reports context no-op without a write', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-refresh-context-noop-');
+
+    await createRefreshProject(projectDirectory);
+    await runRefreshInDirectory(projectDirectory, { changed: ['src/router/index.ts'] });
+
+    const output = await runRefreshInDirectory(projectDirectory, { changed: ['src/router/index.ts'] });
+    const summary = parseSummary(output);
+    const contextAction = summary.actions.find((action) => action.target === 'context');
+
+    assert.deepEqual(summary.writes, []);
+    assert.equal(contextAction?.changed, false);
+    assert.equal(contextAction?.wrote, false);
   });
 
   it('does not scan or create .veaw when no changes exist', async (): Promise<void> => {
@@ -794,6 +873,7 @@ function isRefreshSummary(value: unknown): value is RefreshSummary {
     typeof value.source === 'string' &&
     Array.isArray(value.sources) &&
     Array.isArray(value.changedFiles) &&
+    Array.isArray(value.actions) &&
     Array.isArray(value.writes) &&
     Object.hasOwn(value, 'skippedReason')
   );

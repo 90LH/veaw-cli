@@ -143,6 +143,12 @@ interface ContextCommandContext {
   readonly contextPath: string;
 }
 
+interface ContextGeneratedRefreshResult {
+  readonly contextPath: string;
+  readonly changed: boolean;
+  readonly wrote: boolean;
+}
+
 /**
  * Workspace context 资源集合。
  */
@@ -191,20 +197,7 @@ export function registerContextCommand(program: Command): void {
  */
 export async function runContextCommand(): Promise<void> {
   try {
-    const context = await createContextCommandContext(process.cwd());
-    const projectJson = await readJsonObject(context.projectJsonPath, 'project.json');
-    const catalogJson = await readOptionalJsonObject(context.catalogJsonPath);
-    const components = readCatalogComponents(catalogJson);
-    const projectInsights = await inspectProjectInsights(context.targetDirectory, readProjectDependencies(projectJson));
-    const resources = await readWorkspaceContextResources(
-      context.targetDirectory,
-      createProjectProfileFromProjectJson(projectJson),
-    );
-    const generatedContent = generateContextMarkdown(projectJson, components, projectInsights, resources);
-    const nextContent = await mergeContextContent(context.contextPath, generatedContent);
-
-    await fs.outputFile(context.contextPath, nextContent);
-
+    await refreshContextGeneratedSection(process.cwd(), true);
     logger.success('上下文生成完成');
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -212,6 +205,37 @@ export async function runContextCommand(): Promise<void> {
     logger.error(`上下文生成失败：${message}`);
     process.exitCode = 1;
   }
+}
+
+export async function refreshContextGeneratedSection(
+  targetDirectory: string,
+  writeGenerated: boolean,
+): Promise<ContextGeneratedRefreshResult> {
+  const context = await createContextCommandContext(targetDirectory);
+  const projectJson = await readJsonObject(context.projectJsonPath, 'project.json');
+  const catalogJson = await readOptionalJsonObject(context.catalogJsonPath);
+  const components = readCatalogComponents(catalogJson);
+  const projectInsights = await inspectProjectInsights(context.targetDirectory, readProjectDependencies(projectJson));
+  const resources = await readWorkspaceContextResources(
+    context.targetDirectory,
+    createProjectProfileFromProjectJson(projectJson),
+  );
+  const currentContent = await readCurrentContextContent(context.contextPath);
+  const generatedAt = readGeneratedAt(currentContent) ?? new Date().toISOString();
+  const generatedContent = generateContextMarkdown(projectJson, components, projectInsights, resources, generatedAt);
+  const nextContent = mergeContextContent(currentContent, generatedContent);
+  const changed = currentContent !== nextContent;
+  const wrote = writeGenerated && changed;
+
+  if (wrote) {
+    await fs.outputFile(context.contextPath, nextContent);
+  }
+
+  return {
+    contextPath: context.contextPath,
+    changed,
+    wrote,
+  };
 }
 
 /**
@@ -338,10 +362,10 @@ function generateContextMarkdown(
   components: readonly CatalogComponent[],
   projectInsights: ProjectInsightSummary,
   resources: WorkspaceContextResources,
+  generatedAt: string,
 ): string {
   const stats = createComponentStats(components);
   const categories = categorizeComponents(components);
-  const generatedAt = new Date().toISOString();
 
   return [
     AUTO_CONTEXT_START,
@@ -498,18 +522,32 @@ function createResourceContentMarkdown(resources: readonly ResourceContent[]): s
  * @param generatedContent 自动生成内容。
  * @returns 合并后的内容。
  */
-async function mergeContextContent(contextPath: string, generatedContent: string): Promise<string> {
-  if (!(await fs.pathExists(contextPath))) {
+async function readCurrentContextContent(contextPath: string): Promise<string> {
+  return await fs.pathExists(contextPath) ? fs.readFile(contextPath, 'utf8') : '';
+}
+
+function readGeneratedAt(content: string): string | undefined {
+  const startIndex = content.indexOf(AUTO_CONTEXT_START);
+  const endIndex = content.indexOf(AUTO_CONTEXT_END);
+
+  if (startIndex < 0 || endIndex <= startIndex) {
+    return undefined;
+  }
+
+  return content.slice(startIndex, endIndex).match(/^> Generated at: (.+)$/m)?.[1];
+}
+
+function mergeContextContent(currentContent: string, generatedContent: string): string {
+  if (currentContent.length === 0) {
     return generatedContent;
   }
 
-  const currentContent = await fs.readFile(contextPath, 'utf8');
   const startIndex = currentContent.indexOf(AUTO_CONTEXT_START);
   const endIndex = currentContent.indexOf(AUTO_CONTEXT_END);
 
   if (startIndex >= 0 && endIndex > startIndex) {
     const beforeContent = currentContent.slice(0, startIndex).trimEnd();
-    const afterContent = currentContent.slice(endIndex + AUTO_CONTEXT_END.length).trimStart();
+    const afterContent = currentContent.slice(endIndex + AUTO_CONTEXT_END.length).trim();
 
     return joinContentParts([beforeContent, generatedContent.trimEnd(), afterContent]);
   }

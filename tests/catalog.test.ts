@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -110,6 +110,47 @@ describe('runCatalogCommand', (): void => {
       ['options'],
     );
     assert.ok(readUnknownArray(betterScroll, 'usageHints').length > 0);
+  });
+
+  it('removes stale components, preserves custom fields, and skips no-op writes', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-catalog-idempotent-');
+    const catalogPath = path.join(projectDirectory, '.veaw', 'component-catalog', 'catalog.json');
+    const componentPath = path.join(projectDirectory, 'src', 'components', 'DemoButton.vue');
+
+    await createVueComponent(projectDirectory);
+    await runCatalogInDirectory(projectDirectory);
+
+    const initialCatalog = await readJsonObject(catalogPath);
+    const initialComponent = findComponent(readArray(initialCatalog, 'components'), 'src/components/DemoButton.vue');
+
+    await writeJsonFile(catalogPath, {
+      ...initialCatalog,
+      customCatalogField: 'keep-catalog',
+      components: [{ ...initialComponent, customComponentField: 'keep-component' }],
+    });
+    await runCatalogInDirectory(projectDirectory);
+
+    const mergedCatalog = await readJsonObject(catalogPath);
+    const mergedComponent = findComponent(readArray(mergedCatalog, 'components'), 'src/components/DemoButton.vue');
+
+    assert.equal(readString(mergedCatalog, 'customCatalogField'), 'keep-catalog');
+    assert.equal(readString(mergedComponent, 'customComponentField'), 'keep-component');
+
+    const beforeContent = await readFile(catalogPath, 'utf8');
+    const beforeMtime = (await stat(catalogPath)).mtimeMs;
+
+    await runCatalogInDirectory(projectDirectory);
+
+    assert.equal(await readFile(catalogPath, 'utf8'), beforeContent);
+    assert.equal((await stat(catalogPath)).mtimeMs, beforeMtime);
+
+    await unlink(componentPath);
+    await runCatalogInDirectory(projectDirectory);
+
+    const catalogAfterDelete = await readJsonObject(catalogPath);
+
+    assert.equal(readArray(catalogAfterDelete, 'components').length, 0);
+    assert.equal(readString(catalogAfterDelete, 'customCatalogField'), 'keep-catalog');
   });
 });
 

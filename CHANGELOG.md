@@ -1,5 +1,64 @@
 
 # Changelog
+
+## v0.8.0（2026-07-22）
+
+### 修复
+
+* 修复 `veaw catalog` 全量扫描无法清理已删除组件的问题。
+* 修复全量 catalog 生成结果与当前项目源码状态不一致的问题。
+* 修复组件删除后旧组件记录仍残留在 `catalog.json` 中的问题。
+* 修复 catalog 更新时覆盖用户维护字段的问题，确保已有自定义字段能够保留。
+* 修复 `veaw catalog`、`veaw context`、`veaw refresh` 重复执行产生无意义文件 diff 的问题。
+* 修复时间字段更新导致生成文件持续变化的问题。
+* 修复 `generatedAt` 重复生成时被重新写入的问题。
+* 修复 `updatedAt` 在无实际内容变化时仍更新的问题。
+* 修复 `veaw refresh` 中 `wrote` / `changed` 状态与真实文件变化不一致的问题。
+* 修复无项目变化时 refresh 仍报告写入或变更的问题。
+* 修复组件删除、重命名场景下 refresh 无法正确同步 catalog 与 context 的问题。
+* 修复 refresh 过程中可能覆盖已有未提交项目修改的问题。
+
+### 改进
+
+* 改进 catalog 全量扫描机制，现在以当前扫描结果作为权威组件集合。
+* 改进生成文件写入策略，仅在最终内容发生变化时写入磁盘。
+* 改进 catalog、context、refresh 的幂等性，重复执行相同操作不会产生额外 Git diff。
+* 改进 refresh 结果反馈语义，使 `wrote` / `changed` 能准确反映真实变化。
+* 改进组件变更同步流程，提高真实项目接入时的可靠性。
+* 保持现有增量刷新语义不变，避免影响已有项目工作流。
+
+### 测试
+
+* 新增 catalog 全量扫描删除陈旧组件测试。
+* 新增 catalog 用户自定义字段保留测试。
+* 新增 catalog 连续执行无内容变化测试。
+* 新增 context 重复生成稳定性测试。
+* 新增 refresh 无真实变化时 `changed=false` / `wrote=false` 测试。
+* 新增组件删除后的 refresh 同步测试。
+* 新增组件重命名后的 refresh 同步测试。
+* 完成完整测试、类型检查和构建验证。
+
+### 范围说明
+
+* 本版本仅针对 VEAW CLI 接入真实项目之前的稳定性问题进行修复。
+* 未包含 Agent、Skill、MCP、状态缓存及其他架构扩展。
+* 保持现有 CLI 接口兼容，并采用最小范围修改策略。
+
+### 风险
+
+* 大型项目全量 catalog 扫描性能仍需进一步验证。
+* 多人协作环境下 `.veaw` 文件冲突处理策略仍需持续观察。
+* catalog schema 后续演进仍需要版本迁移机制支持。
+
+## v0.7.0（2026-07-22）
+
+### 修复
+
+* 修复 Git change collector 默认包含已提交历史文件，导致 `veaw status` / `veaw refresh` 结果与当前工作区状态不一致的问题。
+* 修复 `veaw status` / `veaw refresh` 将 `git-today` 提交文件混入 `changedFiles` 的问题。
+* 修复当天已提交的 `.gitignore`、`opengrpc/module/rb/dragon.ts` 等历史文件影响 AI 上下文刷新的问题。
+
+### 改进
 ## v0.7.0（2026-07-22）
 
 ### 修复

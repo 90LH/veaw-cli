@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -63,6 +63,35 @@ describe('runContextCommand', (): void => {
 
     assert.match(contextContent, /# VEAW Project Context/);
     assert.match(contextContent, /当前未发现 Workspace Registry 资源/);
+  });
+
+  it('preserves manual regions and skips no-op writes', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-context-idempotent-');
+    const contextPath = path.join(projectDirectory, '.veaw', 'context.md');
+
+    await createVeawProject(projectDirectory);
+    await runContextInDirectory(projectDirectory);
+
+    const generatedContent = await readFile(contextPath, 'utf8');
+    const generatedAt = generatedContent.match(/^> Generated at: (.+)$/m)?.[1];
+
+    assert.ok(generatedAt);
+
+    await writeFile(contextPath, `# Manual Head\n\n${generatedContent.trim()}\n\n# Manual Tail\n`);
+    await runContextInDirectory(projectDirectory);
+
+    const mergedContent = await readFile(contextPath, 'utf8');
+
+    assert.match(mergedContent, /^# Manual Head/m);
+    assert.match(mergedContent, /^# Manual Tail/m);
+    assert.equal(mergedContent.match(/^> Generated at: (.+)$/m)?.[1], generatedAt);
+
+    const beforeMtime = (await stat(contextPath)).mtimeMs;
+
+    await runContextInDirectory(projectDirectory);
+
+    assert.equal(await readFile(contextPath, 'utf8'), mergedContent);
+    assert.equal((await stat(contextPath)).mtimeMs, beforeMtime);
   });
 });
 
