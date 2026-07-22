@@ -263,6 +263,50 @@ interface CatalogContext {
 }
 
 /**
+ * catalog 增量刷新输入。
+ */
+export interface CatalogGeneratedRefreshInput {
+  /**
+   * 项目根目录。
+   */
+  readonly targetDirectory: string;
+  /**
+   * 项目相对变更文件。
+   */
+  readonly changedFiles: readonly string[];
+  /**
+   * 是否写入 catalog 生成文件。
+   */
+  readonly writeGenerated: boolean;
+}
+
+/**
+ * catalog 增量刷新结果。
+ */
+export interface CatalogGeneratedRefreshResult {
+  /**
+   * catalog.json 路径。
+   */
+  readonly catalogPath: string;
+  /**
+   * 实际分析的组件文件。
+   */
+  readonly scannedFiles: readonly string[];
+  /**
+   * 从 catalog 移除的组件文件。
+   */
+  readonly removedFiles: readonly string[];
+  /**
+   * catalog 中的组件数量。
+   */
+  readonly componentCount: number;
+  /**
+   * 是否发生写入。
+   */
+  readonly wrote: boolean;
+}
+
+/**
  * 解析组件的上下文。
  */
 interface AnalyzeContext {
@@ -344,6 +388,55 @@ export async function runCatalogCommand(): Promise<void> {
     logger.error(`组件目录生成失败：${message}`);
     process.exitCode = 1;
   }
+}
+
+/**
+ * 按变更文件增量刷新 catalog 生成项。
+ *
+ * @param input 增量刷新输入。
+ * @returns 增量刷新结果。
+ */
+export async function refreshCatalogGeneratedEntries(
+  input: CatalogGeneratedRefreshInput,
+): Promise<CatalogGeneratedRefreshResult> {
+  const context = createCatalogContext(input.targetDirectory);
+  const existingCatalog = await readExistingCatalog(context.catalogPath);
+  const changedComponentFiles = await resolveChangedComponentFiles(context.targetDirectory, input.changedFiles);
+  const removedFiles = resolveRemovedComponentFiles(context.targetDirectory, input.changedFiles);
+  const existingComponents = readExistingComponents(existingCatalog);
+  const componentPathSet = new Set([
+    ...readExistingComponentPaths(existingComponents),
+    ...changedComponentFiles.map((filePath) => normalizePath(path.relative(context.targetDirectory, filePath))),
+  ]);
+  const analyzeContext: AnalyzeContext = {
+    targetDirectory: context.targetDirectory,
+    componentPathSet,
+  };
+  const changedComponents: CatalogComponent[] = [];
+
+  for (const filePath of changedComponentFiles) {
+    changedComponents.push(await analyzeComponent(filePath, analyzeContext));
+  }
+
+  const mergedComponents = attachUsageMetadata(
+    mergeIncrementalComponents(existingComponents, changedComponents, removedFiles),
+  );
+  const nextCatalog = createCatalogObject(existingCatalog, mergedComponents, readExistingCatalogResources(existingCatalog));
+
+  if (input.writeGenerated && (changedComponentFiles.length > 0 || removedFiles.length > 0)) {
+    await fs.ensureDir(context.componentCatalogDirectory);
+    await fs.outputJson(context.catalogPath, nextCatalog, {
+      spaces: 2,
+    });
+  }
+
+  return {
+    catalogPath: context.catalogPath,
+    scannedFiles: changedComponentFiles.map((filePath) => normalizePath(path.relative(context.targetDirectory, filePath))),
+    removedFiles,
+    componentCount: mergedComponents.length,
+    wrote: input.writeGenerated && (changedComponentFiles.length > 0 || removedFiles.length > 0),
+  };
 }
 
 /**
@@ -545,16 +638,33 @@ function attachUsageMetadata(components: readonly CatalogComponent[]): readonly 
 
   return components.map((component) => {
     const usedBy = usedByMap.get(component.filePath);
+    const componentWithoutUsedBy = removeUsedByMetadata(component);
 
     if (usedBy === undefined || usedBy.length === 0) {
-      return component;
+      return componentWithoutUsedBy;
     }
 
     return {
-      ...component,
+      ...componentWithoutUsedBy,
       usedBy: [...new Set(usedBy)].sort((left, right) => left.localeCompare(right)),
     };
   });
+}
+
+/**
+ * 移除旧 usedBy 元数据。
+ *
+ * @param component 组件目录项。
+ * @returns 不含旧 usedBy 的组件目录项。
+ */
+function removeUsedByMetadata(component: CatalogComponent): CatalogComponent {
+  const componentRecord = {
+    ...toJsonObject(component),
+  };
+
+  delete componentRecord.usedBy;
+
+  return componentRecord as unknown as CatalogComponent;
 }
 
 /**
@@ -1336,16 +1446,33 @@ function mergeCatalog(
   components: readonly CatalogComponent[],
   availableResources: readonly CatalogResourceSummary[],
 ): JsonObject {
-  const now = new Date().toISOString();
   const existingComponents = readExistingComponents(existingCatalog);
   const mergedComponents = mergeComponents(existingComponents, components);
+
+  return createCatalogObject(existingCatalog, mergedComponents, availableResources);
+}
+
+/**
+ * 创建 catalog JSON 对象。
+ *
+ * @param existingCatalog 已有 catalog。
+ * @param components 组件列表。
+ * @param availableResources 可用资源摘要。
+ * @returns catalog JSON 对象。
+ */
+function createCatalogObject(
+  existingCatalog: JsonObject | undefined,
+  components: readonly CatalogComponent[],
+  availableResources: readonly CatalogResourceSummary[],
+): JsonObject {
+  const now = new Date().toISOString();
   const baseCatalog: ComponentCatalog = {
     version: CATALOG_VERSION,
     generatedAt: readExistingString(existingCatalog, 'generatedAt') ?? now,
     updatedAt: now,
     scanRoots: SCAN_ROOTS,
     availableResources,
-    components: mergedComponents,
+    components,
   };
 
   return {
@@ -1403,6 +1530,130 @@ function mergeComponents(
   });
 
   return [...mergedComponents, ...([...existingComponentMap.values()] as unknown as CatalogComponent[])];
+}
+
+/**
+ * 增量合并组件列表。
+ *
+ * @param existingComponents 已有组件列表。
+ * @param changedComponents 已重新分析组件。
+ * @param removedFiles 已删除组件文件。
+ * @returns 合并后的组件列表。
+ */
+function mergeIncrementalComponents(
+  existingComponents: readonly JsonObject[],
+  changedComponents: readonly CatalogComponent[],
+  removedFiles: readonly string[],
+): readonly CatalogComponent[] {
+  const changedComponentMap = new Map(changedComponents.map((component) => [component.filePath, component]));
+  const removedFileSet = new Set(removedFiles);
+  const mergedComponents: CatalogComponent[] = [];
+
+  for (const component of existingComponents) {
+    const filePath = typeof component.filePath === 'string' ? component.filePath : undefined;
+
+    if (filePath === undefined || removedFileSet.has(filePath)) {
+      continue;
+    }
+
+    const changedComponent = changedComponentMap.get(filePath);
+
+    if (changedComponent === undefined) {
+      mergedComponents.push(component as unknown as CatalogComponent);
+      continue;
+    }
+
+    mergedComponents.push({
+      ...component,
+      ...toJsonObject(changedComponent),
+    } as unknown as CatalogComponent);
+    changedComponentMap.delete(filePath);
+  }
+
+  return [
+    ...mergedComponents,
+    ...[...changedComponentMap.values()].sort((left, right) => left.filePath.localeCompare(right.filePath)),
+  ];
+}
+
+/**
+ * 读取已有组件路径。
+ *
+ * @param existingComponents 已有组件列表。
+ * @returns 组件路径。
+ */
+function readExistingComponentPaths(existingComponents: readonly JsonObject[]): readonly string[] {
+  return existingComponents
+    .map((component) => component.filePath)
+    .filter((filePath): filePath is string => typeof filePath === 'string');
+}
+
+/**
+ * 读取已有 catalog 资源摘要。
+ *
+ * @param existingCatalog 已有 catalog。
+ * @returns 资源摘要列表。
+ */
+function readExistingCatalogResources(existingCatalog: JsonObject | undefined): readonly CatalogResourceSummary[] {
+  const resources = existingCatalog?.availableResources;
+
+  if (!Array.isArray(resources)) {
+    return [];
+  }
+
+  return resources.filter(isJsonObject) as unknown as readonly CatalogResourceSummary[];
+}
+
+/**
+ * 解析变更中的现存组件文件。
+ *
+ * @param targetDirectory 项目根目录。
+ * @param changedFiles 项目相对变更文件。
+ * @returns 现存组件文件绝对路径。
+ */
+async function resolveChangedComponentFiles(
+  targetDirectory: string,
+  changedFiles: readonly string[],
+): Promise<readonly string[]> {
+  const componentFiles: string[] = [];
+
+  for (const changedFile of changedFiles) {
+    if (!isCatalogInputFile(changedFile)) {
+      continue;
+    }
+
+    const filePath = path.join(targetDirectory, changedFile);
+
+    if ((await fs.pathExists(filePath)) && (await fs.stat(filePath)).isFile()) {
+      componentFiles.push(filePath);
+    }
+  }
+
+  return componentFiles.sort((left, right) => normalizePath(left).localeCompare(normalizePath(right)));
+}
+
+/**
+ * 解析变更中已删除的组件文件。
+ *
+ * @param targetDirectory 项目根目录。
+ * @param changedFiles 项目相对变更文件。
+ * @returns 已删除组件文件。
+ */
+function resolveRemovedComponentFiles(targetDirectory: string, changedFiles: readonly string[]): readonly string[] {
+  return changedFiles
+    .filter(isCatalogInputFile)
+    .filter((changedFile) => !fs.pathExistsSync(path.join(targetDirectory, changedFile)))
+    .sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * 判断文件是否属于 catalog 增量输入。
+ *
+ * @param filePath 项目相对路径。
+ * @returns 是否属于组件目录输入。
+ */
+function isCatalogInputFile(filePath: string): boolean {
+  return SCAN_ROOTS.some((scanRoot) => filePath.startsWith(`${scanRoot}/`)) && isComponentFile(filePath);
 }
 
 /**

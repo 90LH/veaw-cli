@@ -1,5 +1,186 @@
 # Changelog
 
+# Changelog
+
+## v0.5.0（2026-07-21）
+
+### 新增
+
+* 新增 `veaw refresh` 增量分析命令，用于基于项目变更生成 AI Workspace 更新摘要。
+* 新增 refresh JSON Summary 输出能力，默认仅分析并返回结果，不产生任何文件写入。
+* 新增 `--write-generated` 显式写入模式，仅在用户确认后更新 `.veaw` 生成区内容。
+* 新增 `src/layouts` 作为组件资产分析输入目录，与现有组件扫描规则保持一致。
+* 新增 `veaw status` 增量状态检查能力，用于报告当天 Git Diff 对应的待更新 catalog/context 项。
+
+### 架构优化
+
+* refresh 流程复用现有 catalog 扫描机制，避免重复建设组件分析逻辑。
+* refresh 流程复用已有 context 生成流程，不重新设计上下文生成体系。
+* 增强增量分析策略，仅处理发生变化的项目文件，避免无变更场景重复扫描。
+* 优化生成区写入边界，明确区分分析阶段与写入阶段。
+
+### 安全与稳定性
+
+* `veaw refresh` 默认进入只读模式，保证执行过程零文件修改。
+
+* 新增 dry-run 零写入验证机制，通过执行前后文件快照确认无副作用。
+
+* 禁止 refresh/status 流程修改：
+
+  * `project.json` 自定义字段
+  * 用户已有配置内容
+  * init/sync/migrate 相关数据
+  * lockfile 文件
+
+* 增强敏感目录排除策略：
+
+  * `.env*`
+  * 密钥文件
+  * 证书文件
+  * `.git`
+  * `node_modules`
+  * `dist`
+  * VEAW 生成目录
+
+### 命令行为调整
+
+#### `veaw refresh`
+
+默认行为：
+
+```bash
+veaw refresh
+```
+
+仅输出：
+
+* 变更文件摘要
+* 待更新 catalog 项
+* 待更新 context 项
+* 增量分析结果
+
+不会：
+
+* 修改 `.veaw`
+* 更新 catalog
+* 更新 context
+* 覆盖用户内容
+
+写入模式：
+
+```bash
+veaw refresh --write-generated
+```
+
+允许：
+
+* 更新 `.veaw` 生成区
+* 写入 refresh 产生的生成结果
+
+### `veaw status`
+
+新增：
+
+* 基于当天 Git Diff 判断待同步内容。
+* 输出 catalog/context 待更新状态。
+* 保持只读行为，不产生任何文件修改。
+
+### 测试
+
+新增：
+
+* refresh 命令测试覆盖。
+* dry-run 零写入验证测试。
+* `--write-generated` 写入边界测试。
+* 增量扫描行为测试。
+
+验证：
+
+* typecheck ✅
+* lint ✅
+* test ✅
+* build ✅
+
+### 变更范围
+
+本版本严格限制修改范围：
+
+* `src/commands/refresh.ts`
+* `src/index.ts`
+* `src/commands/catalog.ts`
+* `tests/refresh.test.ts`
+
+以及必要的共享类型/工具文件。
+
+未涉及：
+
+* init 流程
+* sync 流程
+* migrate 流程
+* lockfile 管理
+* 用户配置覆盖逻辑
+
+### 风险与后续规划
+
+当前版本完成基础增量刷新能力，仍存在以下演进方向：
+
+* 增量分析缓存机制。
+* 更细粒度的组件资产影响分析。
+* Agent 调度层与 refresh/status 的联动。
+* 多项目 Workspace 状态聚合。
+* AI Context 自动优化策略。
+
+---
+
+## v0.3.0（2026-07-15）
+
+### 新增
+
+* 新增 Component Asset Analysis Agent。
+* 新增 Component Analysis Skill。
+* 新增组件智能工作流。
+* 新增组件资产识别、分类、接口摘要、引用关系分析能力。
+
+### 优化
+
+* Codex Agent Router 增加组件资产分析任务路由。
+* Shared Skill Index 增加 component-analysis。
+* 完善 AI Frontend Workspace 组件智能化能力。
+
+---
+
+## v0.2.0（2026-07-14）
+
+### 新增
+
+* 新增 VEAW Workspace 初始化能力。
+* 新增 `.veaw` 工作空间结构生成。
+* 新增 project/context/session 基础上下文管理。
+
+### 命令
+
+新增：
+
+```bash
+veaw init
+veaw doctor
+veaw version
+```
+
+---
+
+## v0.1.0（2026-07-13）
+
+### 初始版本
+
+* 初始化 VEAW CLI 项目。
+* 支持 TypeScript CLI 架构。
+* 集成 Commander、Inquirer、Chalk、Ora、fs-extra、execa。
+* 支持 pnpm + Node.js 20 开发环境。
+
+# v0.4.0（2026-07-21）
+
+## ✨ 新增（Added）
 进入 VEAW 第二阶段开发：构建可组合、可降级、无外部 AI 强依赖的研发上下文能力，并新增“基于 UI 截图调用公司内部组件库 MCP”能力。
 
 总约束：
