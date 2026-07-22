@@ -20,7 +20,12 @@ type JsonObject = Record<string, JsonValue>;
 /**
  * 变更来源。
  */
-type RefreshChangeSource = 'changed-option' | 'git-today';
+type RefreshChangeSource = 'changed-option' | 'git-auto';
+
+/**
+ * 变更来源明细。
+ */
+type RefreshChangeSourceDetail = 'changed-option' | 'working-tree' | 'staged' | 'untracked' | 'git-today';
 
 /**
  * 文件排除原因。
@@ -35,6 +40,11 @@ type ExclusionReason =
   | 'outside-project';
 
 /**
+ * 跳过原因。
+ */
+type RefreshSkippedReason = 'no-changes' | 'no-routed-targets';
+
+/**
  * refresh 命令选项。
  */
 interface RefreshCommandOptions {
@@ -46,6 +56,10 @@ interface RefreshCommandOptions {
    * 是否写入生成区。
    */
   readonly writeGenerated?: boolean;
+  /**
+   * 仅预览，不写入。
+   */
+  readonly dryRun?: boolean;
 }
 
 /**
@@ -60,6 +74,20 @@ interface NormalizedChanges {
    * 被排除的文件。
    */
   readonly excludedFiles: readonly ExcludedFile[];
+}
+
+/**
+ * Git 自动检测结果。
+ */
+interface GitAutoChanges {
+  /**
+   * Git 变更文件。
+   */
+  readonly files: readonly string[];
+  /**
+   * Git 变更来源。
+   */
+  readonly sources: readonly RefreshChangeSourceDetail[];
 }
 
 /**
@@ -103,6 +131,10 @@ interface RefreshSummary {
    */
   readonly source: RefreshChangeSource;
   /**
+   * 变更来源明细。
+   */
+  readonly sources: readonly RefreshChangeSourceDetail[];
+  /**
    * 是否写入生成区。
    */
   readonly writeGenerated: boolean;
@@ -129,7 +161,7 @@ interface RefreshSummary {
   /**
    * 跳过原因。
    */
-  readonly skippedReason?: string;
+  readonly skippedReason: RefreshSkippedReason | null;
 }
 
 /**
@@ -199,7 +231,8 @@ export function registerRefreshCommand(program: Command): void {
     .command('refresh')
     .description('Incrementally refresh VEAW generated catalog/context from changed files.')
     .option('--changed <files...>', 'Changed files to route into catalog/context refresh.')
-    .option('--write-generated', 'Write .veaw generated catalog/context output.')
+    .option('--dry-run', 'Print a JSON preview without writing generated files.')
+    .option('--write-generated', 'Deprecated: refresh writes generated files by default unless --dry-run is used.')
     .action(async (options: RefreshCommandOptions): Promise<void> => {
       await runRefreshCommand(options);
     });
@@ -219,13 +252,15 @@ export function registerRefreshCommand(program: Command): void {
  */
 export async function runRefreshCommand(options: RefreshCommandOptions = {}): Promise<void> {
   try {
-    const source: RefreshChangeSource = options.changed === undefined ? 'git-today' : 'changed-option';
-    const changedFiles = source === 'changed-option' ? parseChangedOption(options.changed) : await readTodayGitChangedFiles(process.cwd());
+    const changes = options.changed === undefined
+      ? await readGitAutoChangedFiles(process.cwd())
+      : createChangedOptionChanges(options.changed);
     const summary = await createRefreshSummary({
       command: 'refresh',
-      source,
-      changedFiles,
-      writeGenerated: options.writeGenerated === true,
+      source: options.changed === undefined ? 'git-auto' : 'changed-option',
+      sources: changes.sources,
+      changedFiles: changes.files,
+      writeGenerated: options.dryRun !== true,
     });
 
     console.log(JSON.stringify(summary, undefined, 2));
@@ -242,10 +277,12 @@ export async function runRefreshCommand(options: RefreshCommandOptions = {}): Pr
  */
 export async function runStatusCommand(): Promise<void> {
   try {
+    const changes = await readGitAutoChangedFiles(process.cwd());
     const summary = await createRefreshSummary({
       command: 'status',
-      source: 'git-today',
-      changedFiles: await readTodayGitChangedFiles(process.cwd()),
+      source: 'git-auto',
+      sources: changes.sources,
+      changedFiles: changes.files,
       writeGenerated: false,
     });
 
@@ -267,28 +304,31 @@ export async function runStatusCommand(): Promise<void> {
 async function createRefreshSummary(input: {
   readonly command: 'refresh' | 'status';
   readonly source: RefreshChangeSource;
+  readonly sources: readonly RefreshChangeSourceDetail[];
   readonly changedFiles: readonly string[];
   readonly writeGenerated: boolean;
 }): Promise<RefreshSummary> {
   const targetDirectory = process.cwd();
   const normalizedChanges = normalizeChangedFiles(targetDirectory, input.changedFiles);
   const targets = routeRefreshTargets(normalizedChanges.files);
+  const skippedReason = resolveSkippedReason(input.changedFiles, normalizedChanges.files, targets);
 
   if (normalizedChanges.files.length === 0) {
     return {
       command: input.command,
       source: input.source,
+      sources: input.sources,
       writeGenerated: input.writeGenerated,
       changedFiles: [],
       excludedFiles: normalizedChanges.excludedFiles,
       targets,
       actions: [],
       writes: [],
-      skippedReason: input.changedFiles.length === 0 ? 'no-changes' : 'no-routed-targets',
+      skippedReason,
     };
   }
 
-  const actions = createDryRunActions(targets);
+  const actions = input.writeGenerated ? [] : createDryRunActions(targets);
   const writes: string[] = [];
 
   if (input.writeGenerated && input.command === 'refresh') {
@@ -323,14 +363,39 @@ async function createRefreshSummary(input: {
   return {
     command: input.command,
     source: input.source,
+    sources: input.sources,
     writeGenerated: input.writeGenerated && input.command === 'refresh',
     changedFiles: normalizedChanges.files,
     excludedFiles: normalizedChanges.excludedFiles,
     targets,
     actions,
     writes: [...new Set(writes)].sort((left, right) => left.localeCompare(right)),
-    skippedReason: targets.catalog.length === 0 && targets.context.length === 0 ? 'no-routed-targets' : undefined,
+    skippedReason,
   };
+}
+
+/**
+ * 解析跳过原因。
+ *
+ * @param changedFiles 原始变更文件。
+ * @param routedInputFiles 参与路由的文件。
+ * @param targets 待刷新目标。
+ * @returns 跳过原因或 null。
+ */
+function resolveSkippedReason(
+  changedFiles: readonly string[],
+  routedInputFiles: readonly string[],
+  targets: RefreshTargets,
+): RefreshSkippedReason | null {
+  if (changedFiles.length === 0) {
+    return 'no-changes';
+  }
+
+  if (routedInputFiles.length === 0 || (targets.catalog.length === 0 && targets.context.length === 0)) {
+    return 'no-routed-targets';
+  }
+
+  return null;
 }
 
 /**
@@ -398,21 +463,56 @@ function parseChangedOption(value: string | readonly string[] | undefined): read
 }
 
 /**
- * 读取当天 Git 变更文件。
+ * 创建 changed 选项变更集合。
+ *
+ * @param value changed 选项值。
+ * @returns changed 选项变更集合。
+ */
+function createChangedOptionChanges(value: string | readonly string[] | undefined): GitAutoChanges {
+  return {
+    files: parseChangedOption(value),
+    sources: ['changed-option'],
+  };
+}
+
+/**
+ * 读取 Git 自动检测变更文件。
  *
  * @param targetDirectory 项目根目录。
- * @returns 变更文件。
+ * @returns Git 自动检测变更集合。
  */
-async function readTodayGitChangedFiles(targetDirectory: string): Promise<readonly string[]> {
+async function readGitAutoChangedFiles(targetDirectory: string): Promise<GitAutoChanges> {
   const since = createTodayStartIsoString();
   const outputs = await Promise.all([
-    runGitCommand(targetDirectory, ['diff', '--name-only', '--diff-filter=ACMRT', 'HEAD']),
-    runGitCommand(targetDirectory, ['diff', '--cached', '--name-only', '--diff-filter=ACMRT']),
-    runGitCommand(targetDirectory, ['ls-files', '--others', '--exclude-standard']),
-    runGitCommand(targetDirectory, ['log', `--since=${since}`, '--name-only', '--pretty=format:', '--diff-filter=ACMRT']),
+    readGitChangeSource(targetDirectory, 'working-tree', ['diff', '--name-only']),
+    readGitChangeSource(targetDirectory, 'staged', ['diff', '--cached', '--name-only']),
+    readGitChangeSource(targetDirectory, 'untracked', ['ls-files', '--others', '--exclude-standard']),
+    readGitChangeSource(targetDirectory, 'git-today', ['log', `--since=${since}`, '--name-only', '--pretty=format:']),
   ]);
 
-  return uniqueSorted(outputs.flatMap(splitOutputLines));
+  return {
+    files: uniqueSorted(outputs.flatMap((output) => output.files)),
+    sources: outputs.map((output) => output.source),
+  };
+}
+
+/**
+ * 读取单个 Git 变更来源。
+ *
+ * @param targetDirectory 项目根目录。
+ * @param source 变更来源。
+ * @param args Git 参数。
+ * @returns Git 来源变更文件。
+ */
+async function readGitChangeSource(
+  targetDirectory: string,
+  source: RefreshChangeSourceDetail,
+  args: readonly string[],
+): Promise<{ readonly source: RefreshChangeSourceDetail; readonly files: readonly string[] }> {
+  return {
+    source,
+    files: splitOutputLines(await runGitCommand(targetDirectory, args)),
+  };
 }
 
 /**

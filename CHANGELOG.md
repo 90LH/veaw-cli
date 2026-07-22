@@ -1,6 +1,95 @@
-# Changelog
 
 # Changelog
+
+## v0.6.0（2026-07-22）
+
+### 修复
+
+* 修复 Git change collector 无法识别当前工作区修改的问题。
+* 修复 `veaw status` 仅返回 `git-today` 提交文件，遗漏未提交修改的问题。
+* 优化 Git 变更收集逻辑，统一合并以下变更来源：
+
+  * working tree：
+
+    * `git diff --name-only`
+  * staged：
+
+    * `git diff --cached --name-only`
+  * untracked：
+
+    * `git ls-files --others --exclude-standard`
+  * git-today：
+
+    * `git log --since="today 00:00" --name-only --pretty=format:`
+
+### 改进
+
+* Git 自动检测来源统一调整为：
+
+```text
+source:
+"git-auto"
+```
+
+* 新增 Git 变更来源标识：
+
+```json
+sources:
+[
+  "working-tree",
+  "staged",
+  "untracked",
+  "git-today"
+]
+```
+
+* 优先保证当前工作区修改被检测，提升 `veaw status` 与真实 Git 状态的一致性。
+
+### 测试
+
+* 新增 Git 工作区修改检测测试。
+
+覆盖场景：
+
+```bash
+git status --short
+
+ M src/views/permissionManagement/index.vue
+```
+
+执行：
+
+```bash
+veaw status
+```
+
+验证结果：
+
+* 输出结果必须包含：
+
+```text
+src/views/permissionManagement/index.vue
+```
+
+### 兼容性
+
+* 保持 `veaw status` 只读行为。
+* 保持 `veaw refresh` 默认 JSON dry-run 行为。
+* 不增加任何自动写入 `.veaw` 生成区的逻辑。
+
+### 影响范围
+
+涉及：
+
+* Git change collector
+* `veaw status`
+* `veaw refresh` 数据来源分析
+
+未改变：
+
+* CLI 命令接口
+* 写入权限模型
+* dry-run 安全约束
 
 ## v0.5.0（2026-07-21）
 

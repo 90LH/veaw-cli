@@ -21,13 +21,25 @@ interface RefreshSummary {
    */
   readonly command: string;
   /**
+   * 变更来源。
+   */
+  readonly source: string;
+  /**
+   * 变更来源明细。
+   */
+  readonly sources: readonly string[];
+  /**
+   * 参与路由的变更文件。
+   */
+  readonly changedFiles: readonly string[];
+  /**
    * 写入文件。
    */
   readonly writes: readonly string[];
   /**
    * 跳过原因。
    */
-  readonly skippedReason?: string;
+  readonly skippedReason: string | null;
   /**
    * 目标摘要。
    */
@@ -56,6 +68,62 @@ afterEach(async (): Promise<void> => {
 });
 
 describe('runRefreshCommand', (): void => {
+  it('auto-detects Git changes and writes catalog output', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-refresh-auto-catalog-');
+
+    await createRefreshProject(projectDirectory);
+    await initializeGitRepository(projectDirectory);
+    await writeFile(
+      path.join(projectDirectory, 'src', 'components', 'DemoButton.vue'),
+      [
+        '<script setup lang="ts">',
+        "defineOptions({ name: 'DemoButtonNext' });",
+        'defineProps<{ readonly label: string }>();',
+        '</script>',
+        '<template><button>{{ label }}</button></template>',
+        '',
+      ].join('\n'),
+    );
+
+    const output = await runRefreshInDirectory(projectDirectory);
+    const summary = parseSummary(output);
+    const catalog = await readJsonObject(path.join(projectDirectory, '.veaw', 'component-catalog', 'catalog.json'));
+    const demoButton = findComponent(readArray(catalog, 'components'), 'src/components/DemoButton.vue');
+
+    assert.equal(readString(demoButton, 'name'), 'DemoButtonNext');
+    assert.equal(summary.source, 'git-auto');
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
+    assert.deepEqual(summary.writes, ['.veaw/component-catalog/catalog.json']);
+    assert.deepEqual(summary.changedFiles, ['src/components/DemoButton.vue']);
+    assert.deepEqual(summary.targets.catalog, ['src/components/DemoButton.vue']);
+    assert.deepEqual(summary.targets.context, []);
+    assertSkippedReason(summary, null);
+  });
+
+  it('auto-detects today Git commits and writes context output', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-refresh-auto-context-');
+
+    await createRefreshProject(projectDirectory);
+    await initializeGitRepository(projectDirectory);
+    await writeFile(path.join(projectDirectory, 'src', 'router', 'index.ts'), 'export const routes = [{ path: "/" }];\n');
+    await runGit(projectDirectory, ['add', 'src/router/index.ts']);
+    await runGit(projectDirectory, ['commit', '-m', 'update router']);
+
+    const output = await runRefreshInDirectory(projectDirectory);
+    const summary = parseSummary(output);
+    const contextContent = await readFile(path.join(projectDirectory, '.veaw', 'context.md'), 'utf8');
+
+    assert.equal(summary.source, 'git-auto');
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
+    assert.deepEqual(summary.writes, ['.veaw/context.md']);
+    assert.deepEqual(summary.targets.catalog, []);
+    assert.deepEqual(summary.targets.context, ['src/router/index.ts']);
+    assert.match(contextContent, /# Manual Context/);
+    assert.match(contextContent, /# Manual Tail/);
+    assert.match(contextContent, /# VEAW Project Context/);
+    assertSkippedReason(summary, null);
+  });
+
   it('prints a dry-run JSON summary without writing files', async (): Promise<void> => {
     const projectDirectory = await createTemporaryDirectory('veaw-refresh-dry-run-');
 
@@ -64,18 +132,22 @@ describe('runRefreshCommand', (): void => {
     const beforeSnapshot = await readVeawSnapshot(projectDirectory);
     const output = await runRefreshInDirectory(projectDirectory, {
       changed: ['src/components/DemoButton.vue', 'src/router/index.ts'],
+      dryRun: true,
     });
     const afterSnapshot = await readVeawSnapshot(projectDirectory);
     const summary = parseSummary(output);
 
     assert.deepEqual(afterSnapshot, beforeSnapshot);
     assert.equal(summary.command, 'refresh');
+    assert.equal(summary.source, 'changed-option');
+    assert.deepEqual(summary.sources, ['changed-option']);
     assert.deepEqual(summary.writes, []);
     assert.deepEqual(summary.targets.catalog, ['src/components/DemoButton.vue']);
     assert.deepEqual(summary.targets.context, ['src/router/index.ts']);
+    assertSkippedReason(summary, null);
   });
 
-  it('writes only generated catalog/context output when explicitly requested', async (): Promise<void> => {
+  it('writes only generated catalog/context output by default', async (): Promise<void> => {
     const projectDirectory = await createTemporaryDirectory('veaw-refresh-write-');
     const projectJsonPath = path.join(projectDirectory, '.veaw', 'project.json');
     const lockfilePath = path.join(projectDirectory, '.veaw', 'resources.lock.json');
@@ -90,7 +162,6 @@ describe('runRefreshCommand', (): void => {
     const beforeSession = await readFile(sessionPath, 'utf8');
     const output = await runRefreshInDirectory(projectDirectory, {
       changed: ['src/components/DemoButton.vue', 'src/layouts/AppShell.vue', 'src/router/index.ts'],
-      writeGenerated: true,
     });
     const summary = parseSummary(output);
     const catalog = await readJsonObject(path.join(projectDirectory, '.veaw', 'component-catalog', 'catalog.json'));
@@ -100,6 +171,7 @@ describe('runRefreshCommand', (): void => {
     const contextContent = await readFile(path.join(projectDirectory, '.veaw', 'context.md'), 'utf8');
 
     assert.deepEqual(summary.writes, ['.veaw/component-catalog/catalog.json', '.veaw/context.md']);
+    assertSkippedReason(summary, null);
     assert.equal(readString(demoButton, 'name'), 'DemoButton');
     assert.equal(readString(demoButton, 'customNote'), 'keep-component-note');
     assert.equal(readString(appShell, 'name'), 'AppShell');
@@ -117,6 +189,7 @@ describe('runRefreshCommand', (): void => {
 
     await createRefreshProject(projectDirectory);
 
+    const beforeSnapshot = await readVeawSnapshot(projectDirectory);
     const output = await runRefreshInDirectory(projectDirectory, {
       changed: [
         '.env.local',
@@ -125,10 +198,13 @@ describe('runRefreshCommand', (): void => {
         'node_modules/vue/index.js',
         'dist/assets/app.js',
         '.veaw/context.md',
+        'README.md',
       ],
     });
     const summary = parseSummary(output);
+    const afterSnapshot = await readVeawSnapshot(projectDirectory);
 
+    assert.deepEqual(afterSnapshot, beforeSnapshot);
     assert.deepEqual(summary.targets, {
       catalog: [],
       context: [],
@@ -144,7 +220,7 @@ describe('runRefreshCommand', (): void => {
         'secret-or-certificate',
       ],
     );
-    assert.equal(summary.skippedReason, 'no-routed-targets');
+    assertSkippedReason(summary, 'no-routed-targets');
   });
 
   it('reports today Git diff in status without writing files', async (): Promise<void> => {
@@ -161,8 +237,55 @@ describe('runRefreshCommand', (): void => {
 
     assert.deepEqual(afterSnapshot, beforeSnapshot);
     assert.equal(summary.command, 'status');
+    assert.equal(summary.source, 'git-auto');
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
     assert.deepEqual(summary.writes, []);
-    assert.deepEqual(summary.targets.context, ['package.json', 'src/api/today.ts', 'src/router/index.ts']);
+    assert.deepEqual(summary.targets.context, ['src/api/today.ts']);
+    assertSkippedReason(summary, null);
+  });
+
+  it('includes current working-tree view changes in status', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-status-working-tree-');
+    const viewPath = path.join(projectDirectory, 'src', 'views', 'permissionManagement', 'index.vue');
+
+    await createRefreshProject(projectDirectory);
+    await fs.ensureDir(path.dirname(viewPath));
+    await writeFile(
+      viewPath,
+      [
+        '<script setup lang="ts">',
+        "defineOptions({ name: 'PermissionManagement' });",
+        '</script>',
+        '<template><section /></template>',
+        '',
+      ].join('\n'),
+    );
+    await initializeGitRepository(projectDirectory);
+    await writeFile(
+      viewPath,
+      [
+        '<script setup lang="ts">',
+        "defineOptions({ name: 'PermissionManagement' });",
+        '</script>',
+        '<template><section data-updated="true" /></template>',
+        '',
+      ].join('\n'),
+    );
+
+    const statusOutput = await runGitWithOutput(projectDirectory, ['status', '--short']);
+    const beforeSnapshot = await readVeawSnapshot(projectDirectory);
+    const output = await runStatusInDirectory(projectDirectory);
+    const afterSnapshot = await readVeawSnapshot(projectDirectory);
+    const summary = parseSummary(output);
+
+    assert.match(statusOutput, / M src\/views\/permissionManagement\/index\.vue/);
+    assert.deepEqual(afterSnapshot, beforeSnapshot);
+    assert.equal(summary.source, 'git-auto');
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
+    assert.ok(summary.changedFiles.includes('src/views/permissionManagement/index.vue'));
+    assert.ok(summary.targets.catalog.includes('src/views/permissionManagement/index.vue'));
+    assert.deepEqual(summary.writes, []);
+    assertSkippedReason(summary, null);
   });
 
   it('does not scan or create .veaw when no changes exist', async (): Promise<void> => {
@@ -170,7 +293,7 @@ describe('runRefreshCommand', (): void => {
     const output = await runRefreshInDirectory(projectDirectory);
     const summary = parseSummary(output);
 
-    assert.equal(summary.skippedReason, 'no-changes');
+    assertSkippedReason(summary, 'no-changes');
     assert.deepEqual(summary.writes, []);
     assert.equal(await fs.pathExists(path.join(projectDirectory, '.veaw')), false);
   });
@@ -185,7 +308,7 @@ describe('runRefreshCommand', (): void => {
  */
 async function runRefreshInDirectory(
   directory: string,
-  options: { readonly changed?: readonly string[]; readonly writeGenerated?: boolean } = {},
+  options: { readonly changed?: readonly string[]; readonly dryRun?: boolean; readonly writeGenerated?: boolean } = {},
 ): Promise<string> {
   return runCommandInDirectory(directory, async (): Promise<void> => {
     await runRefreshCommand(options);
@@ -367,7 +490,10 @@ async function initializeGitRepository(projectDirectory: string): Promise<void> 
   await runGit(projectDirectory, ['config', 'user.email', 'veaw@example.com']);
   await runGit(projectDirectory, ['config', 'user.name', 'VEAW Test']);
   await runGit(projectDirectory, ['add', '.']);
-  await runGit(projectDirectory, ['commit', '-m', 'initial']);
+  await runGit(projectDirectory, ['commit', '-m', 'initial'], {
+    GIT_AUTHOR_DATE: createYesterdayIsoString(),
+    GIT_COMMITTER_DATE: createYesterdayIsoString(),
+  });
 }
 
 /**
@@ -375,11 +501,45 @@ async function initializeGitRepository(projectDirectory: string): Promise<void> 
  *
  * @param projectDirectory 项目目录。
  * @param args Git 参数。
+ * @param environment 环境变量。
  */
-async function runGit(projectDirectory: string, args: readonly string[]): Promise<void> {
+async function runGit(
+  projectDirectory: string,
+  args: readonly string[],
+  environment: Readonly<Record<string, string>> = {},
+): Promise<void> {
   await execa('git', args, {
     cwd: projectDirectory,
+    env: environment,
   });
+}
+
+/**
+ * 执行 Git 命令并读取输出。
+ *
+ * @param projectDirectory 项目目录。
+ * @param args Git 参数。
+ * @returns Git 标准输出。
+ */
+async function runGitWithOutput(projectDirectory: string, args: readonly string[]): Promise<string> {
+  const result = await execa('git', args, {
+    cwd: projectDirectory,
+  });
+
+  return result.stdout;
+}
+
+/**
+ * 创建昨天的 ISO 日期时间。
+ *
+ * @returns ISO 日期时间。
+ */
+function createYesterdayIsoString(): string {
+  const date = new Date();
+
+  date.setDate(date.getDate() - 1);
+
+  return date.toISOString();
 }
 
 /**
@@ -463,6 +623,17 @@ function parseSummary(output: string): RefreshSummary {
 }
 
 /**
+ * 断言 skippedReason 字段存在且值正确。
+ *
+ * @param summary refresh/status 摘要。
+ * @param expected 预期跳过原因。
+ */
+function assertSkippedReason(summary: RefreshSummary, expected: string | null): void {
+  assert.equal(Object.hasOwn(summary, 'skippedReason'), true);
+  assert.equal(summary.skippedReason, expected);
+}
+
+/**
  * 读取对象数组字段。
  *
  * @param record JSON 对象。
@@ -510,7 +681,15 @@ function findComponent(components: readonly JsonObject[], filePath: string): Jso
  * @returns 是否为 refresh/status 摘要。
  */
 function isRefreshSummary(value: unknown): value is RefreshSummary {
-  return isRecord(value) && isRecord(value.targets) && Array.isArray(value.writes);
+  return (
+    isRecord(value) &&
+    isRecord(value.targets) &&
+    typeof value.source === 'string' &&
+    Array.isArray(value.sources) &&
+    Array.isArray(value.changedFiles) &&
+    Array.isArray(value.writes) &&
+    Object.hasOwn(value, 'skippedReason')
+  );
 }
 
 /**
