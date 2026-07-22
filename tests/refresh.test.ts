@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { execa } from 'execa';
 import fs from 'fs-extra';
-import { runRefreshCommand, runStatusCommand } from '../src/commands/refresh.js';
+import { runRefreshCommand, runStatusCommand, setRefreshGitCommandRunnerForTest } from '../src/commands/refresh.js';
 
 /**
  * JSON 对象。
@@ -62,6 +62,8 @@ interface RefreshSummary {
 const temporaryDirectories: string[] = [];
 
 afterEach(async (): Promise<void> => {
+  setRefreshGitCommandRunnerForTest(undefined);
+
   const directories = temporaryDirectories.splice(0);
 
   await Promise.all(directories.map((directory) => rm(directory, { recursive: true, force: true })));
@@ -92,7 +94,7 @@ describe('runRefreshCommand', (): void => {
 
     assert.equal(readString(demoButton, 'name'), 'DemoButtonNext');
     assert.equal(summary.source, 'git-auto');
-    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked']);
     assert.deepEqual(summary.writes, ['.veaw/component-catalog/catalog.json']);
     assert.deepEqual(summary.changedFiles, ['src/components/DemoButton.vue']);
     assert.deepEqual(summary.targets.catalog, ['src/components/DemoButton.vue']);
@@ -100,21 +102,20 @@ describe('runRefreshCommand', (): void => {
     assertSkippedReason(summary, null);
   });
 
-  it('auto-detects today Git commits and writes context output', async (): Promise<void> => {
+  it('auto-detects staged Git changes and writes context output', async (): Promise<void> => {
     const projectDirectory = await createTemporaryDirectory('veaw-refresh-auto-context-');
 
     await createRefreshProject(projectDirectory);
     await initializeGitRepository(projectDirectory);
     await writeFile(path.join(projectDirectory, 'src', 'router', 'index.ts'), 'export const routes = [{ path: "/" }];\n');
     await runGit(projectDirectory, ['add', 'src/router/index.ts']);
-    await runGit(projectDirectory, ['commit', '-m', 'update router']);
 
     const output = await runRefreshInDirectory(projectDirectory);
     const summary = parseSummary(output);
     const contextContent = await readFile(path.join(projectDirectory, '.veaw', 'context.md'), 'utf8');
 
     assert.equal(summary.source, 'git-auto');
-    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked']);
     assert.deepEqual(summary.writes, ['.veaw/context.md']);
     assert.deepEqual(summary.targets.catalog, []);
     assert.deepEqual(summary.targets.context, ['src/router/index.ts']);
@@ -223,7 +224,7 @@ describe('runRefreshCommand', (): void => {
     assertSkippedReason(summary, 'no-routed-targets');
   });
 
-  it('reports today Git diff in status without writing files', async (): Promise<void> => {
+  it('reports untracked workspace changes in status without writing files', async (): Promise<void> => {
     const projectDirectory = await createTemporaryDirectory('veaw-status-git-');
 
     await createRefreshProject(projectDirectory);
@@ -238,7 +239,7 @@ describe('runRefreshCommand', (): void => {
     assert.deepEqual(afterSnapshot, beforeSnapshot);
     assert.equal(summary.command, 'status');
     assert.equal(summary.source, 'git-auto');
-    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked']);
     assert.deepEqual(summary.writes, []);
     assert.deepEqual(summary.targets.context, ['src/api/today.ts']);
     assertSkippedReason(summary, null);
@@ -281,10 +282,116 @@ describe('runRefreshCommand', (): void => {
     assert.match(statusOutput, / M src\/views\/permissionManagement\/index\.vue/);
     assert.deepEqual(afterSnapshot, beforeSnapshot);
     assert.equal(summary.source, 'git-auto');
-    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked', 'git-today']);
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked']);
     assert.ok(summary.changedFiles.includes('src/views/permissionManagement/index.vue'));
     assert.ok(summary.targets.catalog.includes('src/views/permissionManagement/index.vue'));
     assert.deepEqual(summary.writes, []);
+    assertSkippedReason(summary, null);
+  });
+
+  it('merges mocked working-tree, staged, and untracked output into status changed files', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-status-mock-git-');
+    const calls: { readonly targetDirectory: string; readonly args: readonly string[] }[] = [];
+
+    await createRefreshProject(projectDirectory);
+    setRefreshGitCommandRunnerForTest(async (targetDirectory, args): Promise<string> => {
+      calls.push({ targetDirectory, args: [...args] });
+
+      if (args.length === 2 && args[0] === 'diff' && args[1] === '--name-only') {
+        return [
+          ' src\\views\\permissionManagement\\index.vue ',
+          'src/views/permissionManagement/index.vue',
+        ].join('\n');
+      }
+
+      if (args.length === 3 && args[0] === 'diff' && args[1] === '--cached' && args[2] === '--name-only') {
+        return 'src\\router\\index.ts';
+      }
+
+      if (args.length === 3 && args[0] === 'ls-files') {
+        return 'src/api/untracked.ts';
+      }
+
+      if (args[0] === 'log') {
+        return '.gitignore\nopengrpc/module/rb/dragon.ts';
+      }
+
+      return '';
+    });
+
+    const beforeSnapshot = await readVeawSnapshot(projectDirectory);
+    const output = await runStatusInDirectory(projectDirectory);
+    const afterSnapshot = await readVeawSnapshot(projectDirectory);
+    const summary = parseSummary(output);
+
+    assert.deepEqual(afterSnapshot, beforeSnapshot);
+    assert.equal(summary.source, 'git-auto');
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked']);
+    assert.equal(
+      summary.changedFiles.filter((filePath) => filePath === 'src/views/permissionManagement/index.vue').length,
+      1,
+    );
+    assert.ok(summary.changedFiles.includes('src/views/permissionManagement/index.vue'));
+    assert.ok(summary.changedFiles.includes('src/router/index.ts'));
+    assert.ok(summary.changedFiles.includes('src/api/untracked.ts'));
+    assert.equal(summary.changedFiles.includes('.gitignore'), false);
+    assert.equal(summary.changedFiles.includes('opengrpc/module/rb/dragon.ts'), false);
+    assert.ok(summary.targets.catalog.includes('src/views/permissionManagement/index.vue'));
+    assert.ok(summary.targets.context.includes('src/router/index.ts'));
+    assert.ok(summary.targets.context.includes('src/api/untracked.ts'));
+    assert.ok(calls.every((call) => call.targetDirectory === projectDirectory));
+    assert.deepEqual(
+      calls.map((call) => call.args[0]),
+      ['diff', 'diff', 'ls-files'],
+    );
+    assert.deepEqual(summary.writes, []);
+    assertSkippedReason(summary, null);
+  });
+
+  it('excludes files from today committed history when reporting status', async (): Promise<void> => {
+    const projectDirectory = await createTemporaryDirectory('veaw-status-current-only-');
+    const viewPath = path.join(projectDirectory, 'src', 'views', 'permissionManagement', 'index.vue');
+
+    await createRefreshProject(projectDirectory);
+    await fs.ensureDir(path.dirname(viewPath));
+    await writeFile(
+      viewPath,
+      [
+        '<script setup lang="ts">',
+        "defineOptions({ name: 'PermissionManagement' });",
+        '</script>',
+        '<template><section /></template>',
+        '',
+      ].join('\n'),
+    );
+    await initializeGitRepository(projectDirectory);
+    await writeFile(path.join(projectDirectory, '.gitignore'), 'dist\n');
+    await fs.ensureDir(path.join(projectDirectory, 'opengrpc', 'module', 'rb'));
+    await writeFile(path.join(projectDirectory, 'opengrpc', 'module', 'rb', 'dragon.ts'), 'export const dragon = true;\n');
+    await runGit(projectDirectory, ['add', '.gitignore', 'opengrpc/module/rb/dragon.ts']);
+    await runGit(projectDirectory, ['commit', '-m', 'today committed files']);
+    await writeFile(
+      viewPath,
+      [
+        '<script setup lang="ts">',
+        "defineOptions({ name: 'PermissionManagement' });",
+        '</script>',
+        '<template><section data-updated="true" /></template>',
+        '',
+      ].join('\n'),
+    );
+
+    const diffOutput = await runGitWithOutput(projectDirectory, ['diff', '--name-only']);
+    const output = await runStatusInDirectory(projectDirectory);
+    const summary = parseSummary(output);
+
+    assert.deepEqual(diffOutput.split(/\r?\n/g).filter((line) => line.length > 0), [
+      'src/views/permissionManagement/index.vue',
+    ]);
+    assert.deepEqual(summary.sources, ['working-tree', 'staged', 'untracked']);
+    assert.deepEqual(summary.changedFiles, ['src/views/permissionManagement/index.vue']);
+    assert.equal(summary.changedFiles.includes('.gitignore'), false);
+    assert.equal(summary.changedFiles.includes('opengrpc/module/rb/dragon.ts'), false);
     assertSkippedReason(summary, null);
   });
 

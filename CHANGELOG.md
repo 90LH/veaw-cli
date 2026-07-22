@@ -1,6 +1,55 @@
 
 # Changelog
+## v0.7.0（2026-07-22）
 
+### 修复
+
+* 修复 Git change collector 默认包含已提交历史文件，导致 `veaw status` / `veaw refresh` 结果与当前工作区状态不一致的问题。
+* 修复 `veaw status` / `veaw refresh` 将 `git-today` 提交文件混入 `changedFiles` 的问题。
+* 修复当天已提交的 `.gitignore`、`opengrpc/module/rb/dragon.ts` 等历史文件影响 AI 上下文刷新的问题。
+
+### 改进
+
+* 优化 Git 变更收集逻辑，默认仅检测当前未提交项目变更。
+* 统一 `veaw status` 与 `veaw refresh` 的 Git 变更来源：
+
+  * working tree：
+
+    * `git diff --name-only`
+
+  * staged：
+
+    * `git diff --cached --name-only`
+
+  * untracked：
+
+    * `git ls-files --others --exclude-standard`
+
+* 移除 `git-today`（`git log --since="today 00:00"`）作为默认变更来源，避免历史提交污染当前项目上下文。
+* 保持现有敏感路径排除、catalog/context 路由、dry-run 零写入和 refresh 写入保护逻辑不变。
+
+### 测试
+
+* 增加 Git 变更边界测试：
+
+  * 未暂存修改检测。
+  * 暂存修改检测。
+  * 未跟踪文件检测。
+  * 多来源变更合并。
+  * 当天已提交文件不会进入 `changedFiles`。
+  * 默认流程不会调用 `git log`。
+
+* 验证通过：
+
+  * `pnpm run typecheck`
+  * `pnpm run lint`
+  * `pnpm run test`
+  * `pnpm run build`
+
+* 测试结果：
+
+  * `99 tests passed`
+  * `0 failed`
 ## v0.6.0（2026-07-22）
 
 ### 修复

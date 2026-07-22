@@ -25,7 +25,12 @@ type RefreshChangeSource = 'changed-option' | 'git-auto';
 /**
  * 变更来源明细。
  */
-type RefreshChangeSourceDetail = 'changed-option' | 'working-tree' | 'staged' | 'untracked' | 'git-today';
+type RefreshChangeSourceDetail = 'changed-option' | 'working-tree' | 'staged' | 'untracked';
+
+/**
+ * Git 命令执行器。
+ */
+export type GitCommandRunner = (targetDirectory: string, args: readonly string[]) => Promise<string>;
 
 /**
  * 文件排除原因。
@@ -221,6 +226,17 @@ const COMPONENT_EXTENSIONS = ['.vue', '.tsx', '.jsx'] as const;
  */
 const SECRET_EXTENSIONS = ['.pem', '.key', '.cert', '.crt', '.p12', '.pfx', '.der', '.keystore', '.jks'] as const;
 
+let gitCommandRunner: GitCommandRunner = runGitCommandWithExeca;
+
+/**
+ * 设置 refresh/status 测试用 Git 命令执行器。
+ *
+ * @param runner Git 命令执行器；传入 undefined 时恢复默认执行器。
+ */
+export function setRefreshGitCommandRunnerForTest(runner: GitCommandRunner | undefined): void {
+  gitCommandRunner = runner ?? runGitCommandWithExeca;
+}
+
 /**
  * 注册 refresh/status 命令。
  *
@@ -239,7 +255,7 @@ export function registerRefreshCommand(program: Command): void {
 
   program
     .command('status')
-    .description('Report catalog/context items pending from today Git diff without writing files.')
+    .description('Report catalog/context items pending from current Git workspace changes without writing files.')
     .action(async (): Promise<void> => {
       await runStatusCommand();
     });
@@ -482,12 +498,10 @@ function createChangedOptionChanges(value: string | readonly string[] | undefine
  * @returns Git 自动检测变更集合。
  */
 async function readGitAutoChangedFiles(targetDirectory: string): Promise<GitAutoChanges> {
-  const since = createTodayStartIsoString();
   const outputs = await Promise.all([
     readGitChangeSource(targetDirectory, 'working-tree', ['diff', '--name-only']),
     readGitChangeSource(targetDirectory, 'staged', ['diff', '--cached', '--name-only']),
     readGitChangeSource(targetDirectory, 'untracked', ['ls-files', '--others', '--exclude-standard']),
-    readGitChangeSource(targetDirectory, 'git-today', ['log', `--since=${since}`, '--name-only', '--pretty=format:']),
   ]);
 
   return {
@@ -511,7 +525,7 @@ async function readGitChangeSource(
 ): Promise<{ readonly source: RefreshChangeSourceDetail; readonly files: readonly string[] }> {
   return {
     source,
-    files: splitOutputLines(await runGitCommand(targetDirectory, args)),
+    files: splitOutputLines(await gitCommandRunner(targetDirectory, args)),
   };
 }
 
@@ -522,7 +536,7 @@ async function readGitChangeSource(
  * @param args Git 参数。
  * @returns Git 输出。
  */
-async function runGitCommand(targetDirectory: string, args: readonly string[]): Promise<string> {
+async function runGitCommandWithExeca(targetDirectory: string, args: readonly string[]): Promise<string> {
   try {
     const result = await execa('git', args, {
       cwd: targetDirectory,
@@ -532,18 +546,6 @@ async function runGitCommand(targetDirectory: string, args: readonly string[]): 
   } catch {
     return '';
   }
-}
-
-/**
- * 创建本地日期零点字符串。
- *
- * @returns ISO 日期时间字符串。
- */
-function createTodayStartIsoString(): string {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-
-  return start.toISOString();
 }
 
 /**
